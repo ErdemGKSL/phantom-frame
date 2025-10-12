@@ -8,6 +8,18 @@ proxy_port = 3000
 # The backend URL to proxy requests to (default: http://localhost:8080)
 proxy_url = "http://localhost:8080"
 
+# Optional: Paths to include in caching (empty means include all)
+# Supports wildcards: * can appear anywhere in the pattern
+# Supports method prefixes: "GET /api/*", "POST /*/users", etc.
+# Examples: "/api/*", "/*/users", "/public/*/assets", "GET *"
+include_paths = ["/api/*", "/public/*", "GET /admin/stats"]
+
+# Optional: Paths to exclude from caching (empty means exclude none)
+# Supports wildcards: * can appear anywhere in the pattern
+# Supports method prefixes: "POST /api/*", "PUT *", etc.
+# Exclude patterns override include patterns
+exclude_paths = ["/api/admin/*", "/api/*/private", "POST *", "PUT *", "DELETE *"]
+
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <control_auth>
 # control_auth = "your-secret-token-here"

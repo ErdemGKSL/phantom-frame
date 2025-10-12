@@ -19,6 +19,17 @@ pub struct ServerConfig {
     #[serde(default = "default_proxy_url")]
     pub proxy_url: String,
 
+    /// Paths to include in caching (empty means include all)
+    /// Supports wildcards: ["/api/*", "/*/users"]
+    #[serde(default)]
+    pub include_paths: Vec<String>,
+
+    /// Paths to exclude from caching (empty means exclude none)
+    /// Supports wildcards: ["/admin/*", "/*/private"]
+    /// Exclude overrides include
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+
     pub control_auth: Option<String>,
 }
 
@@ -48,6 +59,8 @@ impl Default for ServerConfig {
             control_port: default_control_port(),
             proxy_port: default_proxy_port(),
             proxy_url: default_proxy_url(),
+            include_paths: vec![],
+            exclude_paths: vec![],
             control_auth: None,
         }
     }

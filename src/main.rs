@@ -1,8 +1,5 @@
-use axum::Router;
-use phantom_frame::cache::CacheStore;
-use phantom_frame::{cache::RefreshTrigger, config::Config, control, proxy::ProxyState};
+use phantom_frame::{config::Config, control, CreateProxyConfig};
 use std::env;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,20 +22,18 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Loaded configuration from: {}", config_path);
     tracing::info!("Control port: {}", config.server.control_port);
+    tracing::info!("Proxy port: {}", config.server.proxy_port);
     tracing::info!("Proxy URL: {}", config.server.proxy_url);
+    tracing::info!("Include paths: {:?}", config.server.include_paths);
+    tracing::info!("Exclude paths: {:?}", config.server.exclude_paths);
 
-    // Create refresh trigger and cache
-    let refresh_trigger = RefreshTrigger::new();
-    let cache = CacheStore::new(refresh_trigger.clone());
+    // Create proxy configuration
+    let proxy_config = CreateProxyConfig::new(config.server.proxy_url.clone())
+        .with_include_paths(config.server.include_paths.clone())
+        .with_exclude_paths(config.server.exclude_paths.clone());
 
-    // Create proxy server
-    let proxy_state = Arc::new(ProxyState::new(
-        cache.clone(),
-        config.server.proxy_url.clone(),
-    ));
-    let proxy_app = Router::new()
-        .fallback(phantom_frame::proxy::proxy_handler)
-        .with_state(proxy_state);
+    // Create proxy server with the config
+    let (proxy_app, refresh_trigger) = phantom_frame::create_proxy(proxy_config);
 
     // Create control server
     let control_app =
