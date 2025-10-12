@@ -1,0 +1,13 @@
+[server]
+# Control port for cache management endpoints (default: 17809)
+control_port = 17809
+
+# Proxy port for serving prerendered content (default: 3000)
+proxy_port = 3000
+
+# The backend URL to proxy requests to (default: http://localhost:8080)
+proxy_url = "http://localhost:8080"
+
+# Optional: Bearer token for control endpoint authentication
+# If set, requests to /refresh-cache must include: Authorization: Bearer <control_auth>
+# control_auth = "your-secret-token-here"
