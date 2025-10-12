@@ -3,8 +3,6 @@
 /// Supports wildcard patterns where * can appear anywhere in the pattern
 /// Example patterns: "/api/*", "/*/users", "/api/*/data"
 /// Also supports method prefixes: "POST /api/*", "GET *", "PUT /hello"
-
-/// Parse a pattern into optional method and path parts
 /// Returns (method, path_pattern)
 /// Examples:
 ///   "POST /api/*" -> (Some("POST"), "/api/*")
@@ -17,8 +15,7 @@ fn parse_pattern(pattern: &str) -> (Option<&str>, &str) {
     let methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"];
     
     for method in &methods {
-        if pattern.starts_with(method) {
-            let rest = &pattern[method.len()..];
+        if let Some(rest) = pattern.strip_prefix(method) {
             // Must be followed by whitespace
             if rest.starts_with(' ') || rest.starts_with('\t') {
                 let path_pattern = rest.trim_start();
@@ -32,7 +29,7 @@ fn parse_pattern(pattern: &str) -> (Option<&str>, &str) {
 
 /// Check if a path matches a wildcard pattern
 /// * can appear anywhere and matches any sequence of characters
-/// If method is provided, pattern can optionally specify a method prefix like "POST /api/*"
+///   If method is provided, pattern can optionally specify a method prefix like "POST /api/*"
 pub fn matches_pattern(path: &str, pattern: &str) -> bool {
     matches_pattern_with_method(None, path, pattern)
 }
