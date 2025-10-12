@@ -3,7 +3,6 @@ use phantom_frame::cache::CacheStore;
 use phantom_frame::{cache::RefreshTrigger, config::Config, control, proxy::ProxyState};
 use std::env;
 use std::sync::Arc;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
