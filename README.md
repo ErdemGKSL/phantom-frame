@@ -105,9 +105,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phantom-frame = { version = "0.1.5" }
+phantom-frame = { version = "0.1.8" }
 tokio = { version = "1.40", features = ["full"] }
-axum = "0.7"
+axum = "0.8.6"
 ```
 
 Use in your code:
@@ -141,8 +141,12 @@ async fn main() {
     
     // Trigger cache refresh programmatically
     tokio::spawn(async move {
-        // Your custom logic here
+        // Clear all cache entries
         trigger_clone.trigger();
+        
+        // Or clear only specific cache entries matching a pattern
+        trigger_clone.trigger_by_key_match("GET:/api/*");
+        trigger_clone.trigger_by_key_match("*/users/*");
     });
     
     // Start the proxy server
@@ -219,6 +223,42 @@ let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
 let (proxy_app, refresh_trigger) = create_proxy(proxy_config);
 ```
 
+#### Pattern-Based Cache Invalidation
+
+The `RefreshTrigger` supports both full cache clears and pattern-based invalidation using wildcards:
+
+```rust
+use phantom_frame::{create_proxy, CreateProxyConfig};
+
+let (proxy_app, refresh_trigger) = create_proxy(
+    CreateProxyConfig::new("http://localhost:8080".to_string())
+);
+
+// Clear all cache entries
+refresh_trigger.trigger();
+
+// Clear only entries matching specific patterns (with wildcard support)
+refresh_trigger.trigger_by_key_match("GET:/api/*");        // Clear all GET /api/* requests
+refresh_trigger.trigger_by_key_match("*/users/*");         // Clear all requests with /users/ in path
+refresh_trigger.trigger_by_key_match("POST:*");            // Clear all POST requests
+refresh_trigger.trigger_by_key_match("GET:/api/users");    // Clear exact match
+
+// Use in response to specific events
+tokio::spawn(async move {
+    // Example: Clear user-related cache when user data changes
+    refresh_trigger.trigger_by_key_match("*/users/*");
+    
+    // Example: Clear API cache after data update
+    refresh_trigger.trigger_by_key_match("GET:/api/*");
+});
+```
+
+**Pattern Matching Rules:**
+- `*` matches any sequence of characters
+- Patterns can include the HTTP method prefix (e.g., `GET:/api/*`)
+- Multiple wildcards are supported (e.g., `*/api/*/users/*`)
+- Exact matches work without wildcards (e.g., `GET:/api/users`)
+
 ## Building
 
 ```bash
@@ -283,7 +323,8 @@ Creates a proxy router with an existing refresh trigger.
 
 A clonable trigger for cache invalidation.
 
-- `trigger()` - Trigger a cache refresh
+- `trigger()` - Trigger a full cache refresh (clears all entries)
+- `trigger_by_key_match(pattern: &str)` - Trigger a cache refresh for entries matching a pattern (supports wildcards like `/api/*`, `GET:/api/*`, etc.)
 - `subscribe()` - Subscribe to refresh events (returns a broadcast receiver)
 
 ### Control Endpoints

@@ -88,6 +88,9 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
     let refresh_trigger = RefreshTrigger::new();
     let cache = CacheStore::new(refresh_trigger.clone());
 
+    // Spawn background task to listen for refresh events
+    spawn_refresh_listener(cache.clone());
+
     let proxy_state = Arc::new(ProxyState::new(cache, config));
 
     let app = Router::new()
@@ -100,6 +103,10 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
 /// Create a proxy handler with an existing refresh trigger
 pub fn create_proxy_with_trigger(config: CreateProxyConfig, refresh_trigger: RefreshTrigger) -> Router {
     let cache = CacheStore::new(refresh_trigger);
+    
+    // Spawn background task to listen for refresh events
+    spawn_refresh_listener(cache.clone());
+
     let proxy_state = Arc::new(ProxyState::new(cache, config));
 
     Router::new()
@@ -107,15 +114,40 @@ pub fn create_proxy_with_trigger(config: CreateProxyConfig, refresh_trigger: Ref
         .layer(Extension(proxy_state))
 }
 
+/// Spawn a background task to listen for refresh events
+fn spawn_refresh_listener(cache: CacheStore) {
+    let mut receiver = cache.refresh_trigger().subscribe();
+    
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(cache::RefreshMessage::All) => {
+                    tracing::info!("Cache refresh triggered: clearing all entries");
+                    cache.clear().await;
+                }
+                Ok(cache::RefreshMessage::Pattern(pattern)) => {
+                    tracing::info!("Cache refresh triggered: clearing entries matching pattern '{}'", pattern);
+                    cache.clear_by_pattern(&pattern).await;
+                }
+                Err(e) => {
+                    tracing::error!("Refresh trigger channel error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_create_proxy() {
+    #[tokio::test]
+    async fn test_create_proxy() {
         let config = CreateProxyConfig::new("http://localhost:8080".to_string());
         let (_app, trigger) = create_proxy(config);
         trigger.trigger();
+        trigger.trigger_by_key_match("GET:/api/*");
         // Just ensure it compiles and runs without panic
     }
 }

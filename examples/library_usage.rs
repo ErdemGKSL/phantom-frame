@@ -30,8 +30,16 @@ async fn main() {
     // Example: Trigger cache refresh from another part of your application
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        
+        // Clear all cache entries
         trigger_clone.trigger();
-        println!("Cache refreshed!");
+        println!("All cache cleared!");
+        
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        
+        // Clear only cache entries matching a pattern (supports wildcards)
+        trigger_clone.trigger_by_key_match("GET:/api/*");
+        println!("Cache cleared for GET:/api/* pattern!");
     });
 
     // Start the proxy server
