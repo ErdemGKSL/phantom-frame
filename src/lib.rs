@@ -4,7 +4,7 @@ pub mod control;
 pub mod path_matcher;
 pub mod proxy;
 
-use axum::Router;
+use axum::{extract::Extension, Router};
 use cache::{CacheStore, RefreshTrigger};
 use proxy::ProxyState;
 use std::sync::Arc;
@@ -92,7 +92,7 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
 
     let app = Router::new()
         .fallback(proxy::proxy_handler)
-        .with_state(proxy_state);
+        .layer(Extension(proxy_state));
 
     (app, refresh_trigger)
 }
@@ -104,7 +104,7 @@ pub fn create_proxy_with_trigger(config: CreateProxyConfig, refresh_trigger: Ref
 
     Router::new()
         .fallback(proxy::proxy_handler)
-        .with_state(proxy_state)
+        .layer(Extension(proxy_state))
 }
 
 #[cfg(test)]

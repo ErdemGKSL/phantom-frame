@@ -3,7 +3,7 @@ use crate::path_matcher::should_cache_path;
 use crate::CreateProxyConfig;
 use axum::{
     body::Body,
-    extract::State,
+    extract::Extension,
     http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode},
 };
 use std::sync::Arc;
@@ -23,7 +23,7 @@ impl ProxyState {
 /// Main proxy handler that serves prerendered content from cache
 /// or fetches from backend if not cached
 pub async fn proxy_handler(
-    State(state): State<Arc<ProxyState>>,
+    Extension(state): Extension<Arc<ProxyState>>,
     req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
     let method_str = req.method().as_str();
