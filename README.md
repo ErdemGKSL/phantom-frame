@@ -1,10 +1,10 @@
+# Phantom Frame
+
+A high-performance prerendering proxy engine written in Rust. Cache and serve prerendered content with ease.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/ErdemGKSL/phantom-frame/refs/heads/main/banner.jpg" alt="Phantom Frame Banner" width="100%">
 </p>
-
-# phantom-frame
-
-A high-performance prerendering proxy engine written in Rust. Cache and serve prerendered content with ease.
 
 ## Features
 
