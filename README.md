@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ErdemGKSL/phantom-frame/main/banner.jpg" alt="Phantom Frame Banner" width="100%">
+  <img src="https://raw.githubusercontent.com/ErdemGKSL/phantom-frame/refs/heads/main/banner.jpg" alt="Phantom Frame Banner" width="100%">
 </p>
 
 # phantom-frame
