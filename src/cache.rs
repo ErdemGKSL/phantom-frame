@@ -79,12 +79,10 @@ fn matches_pattern(key: &str, pattern: &str) -> bool {
             }
         }
         // Middle parts must exist in order
-        else {
-            if let Some(pos) = key[current_pos..].find(part) {
-                current_pos += pos + part.len();
-            } else {
-                return false;
-            }
+        else if let Some(pos) = key[current_pos..].find(part) {
+            current_pos += pos + part.len();
+        } else {
+            return false;
         }
     }
 
