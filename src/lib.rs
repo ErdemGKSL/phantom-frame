@@ -42,6 +42,11 @@ pub struct CreateProxyConfig {
     /// the cache and establish a direct bidirectional TCP tunnel
     pub enable_websocket: bool,
     
+    /// Only allow GET requests, reject all others (default: false)
+    /// When true, only GET requests are processed; POST, PUT, DELETE, etc. return 405 Method Not Allowed
+    /// Useful for static site prerendering where mutations shouldn't be allowed
+    pub forward_get_only: bool,
+    
     /// Custom cache key generator
     /// Takes request info and returns a cache key
     /// Default: method + path + query string
@@ -56,6 +61,7 @@ impl CreateProxyConfig {
             include_paths: vec![],
             exclude_paths: vec![],
             enable_websocket: true,
+            forward_get_only: false,
             cache_key_fn: Arc::new(|req_info| {
                 if req_info.query.is_empty() {
                     format!("{}:{}", req_info.method, req_info.path)
@@ -81,6 +87,12 @@ impl CreateProxyConfig {
     /// Enable or disable WebSocket and protocol upgrade support
     pub fn with_websocket_enabled(mut self, enabled: bool) -> Self {
         self.enable_websocket = enabled;
+        self
+    }
+    
+    /// Only allow GET requests, reject all others
+    pub fn with_forward_get_only(mut self, enabled: bool) -> Self {
+        self.forward_get_only = enabled;
         self
     }
     

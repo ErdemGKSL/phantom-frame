@@ -43,17 +43,26 @@ pub async fn proxy_handler(
     Extension(state): Extension<Arc<ProxyState>>,
     req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    let method_str = req.method().as_str();
-    let path = req.uri().path();
-    let query = req.uri().query().unwrap_or("");
-    let headers = req.headers();
+    // Extract request details first (before any borrowing)
+    let method = req.method().clone();
+    let method_str = method.as_str();
+    let uri = req.uri().clone();
+    let path = uri.path();
+    let query = uri.query().unwrap_or("");
+    let headers = req.headers().clone();
+    
+    // Check if only GET requests are allowed
+    if state.config.forward_get_only && method != axum::http::Method::GET {
+        tracing::warn!("Non-GET request {} {} rejected (forward_get_only is enabled)", method_str, path);
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
     
     // Check if this is an upgrade request (WebSocket, etc.)
     // If so, handle it via direct TCP proxying (if enabled)
-    if state.config.enable_websocket && is_upgrade_request(headers) {
+    if state.config.enable_websocket && is_upgrade_request(&headers) {
         tracing::info!("Upgrade request detected for {} {}, establishing direct proxy tunnel", method_str, path);
         return handle_upgrade_request(state, req).await;
-    } else if !state.config.enable_websocket && is_upgrade_request(headers) {
+    } else if !state.config.enable_websocket && is_upgrade_request(&headers) {
         tracing::warn!("Upgrade request detected for {} {} but WebSocket support is disabled", method_str, path);
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
@@ -71,7 +80,7 @@ pub async fn proxy_handler(
         method: method_str,
         path,
         query,
-        headers,
+        headers: &headers,
     };
     let cache_key = (state.config.cache_key_fn)(&req_info);
 
@@ -85,17 +94,24 @@ pub async fn proxy_handler(
     } else {
         tracing::info!("{} {} not cacheable (filtered), proxying directly", method_str, path);
     }
+    
+    // Convert body to bytes to forward it
+    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!("Failed to read request body: {}", e);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
 
     // Fetch from backend (proxy_url)
-    let target_url = format!("{}{}", state.config.proxy_url, req.uri());
+    let target_url = format!("{}{}", state.config.proxy_url, uri);
     let client = reqwest::Client::new();
 
-    let method = req.method().clone();
-    let headers = req.headers().clone();
-
     let response = match client
-        .request(method, &target_url)
+        .request(method.clone(), &target_url)
         .headers(convert_headers(&headers))
+        .body(body_bytes.to_vec())
         .send()
         .await
     {
@@ -300,7 +316,11 @@ fn build_response_from_cache(cached: CachedResponse) -> Response<Body> {
         if let Ok(header_name) = key.parse::<HeaderName>() {
             if let Ok(header_value) = HeaderValue::from_str(&value) {
                 headers.insert(header_name, header_value);
+            } else {
+                tracing::warn!("Failed to parse header value for key '{}': {:?}", key, value);
             }
+        } else {
+            tracing::warn!("Failed to parse header name: {}", key);
         }
     }
 
@@ -310,6 +330,10 @@ fn build_response_from_cache(cached: CachedResponse) -> Response<Body> {
 fn convert_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
     let mut req_headers = reqwest::header::HeaderMap::new();
     for (key, value) in headers {
+        // Skip host header as reqwest will set it
+        if key == axum::http::header::HOST {
+            continue;
+        }
         if let Ok(val) = value.to_str() {
             if let Ok(header_value) = reqwest::header::HeaderValue::from_str(val) {
                 req_headers.insert(key.clone(), header_value);
@@ -326,6 +350,9 @@ fn convert_headers_to_map(
     for (key, value) in headers {
         if let Ok(val) = value.to_str() {
             map.insert(key.to_string(), val.to_string());
+        } else {
+            // Log when we can't convert a header (might be binary)
+            tracing::debug!("Could not convert header '{}' to string", key);
         }
     }
     map

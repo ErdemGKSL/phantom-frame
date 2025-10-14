@@ -36,11 +36,21 @@ pub struct ServerConfig {
     #[serde(default = "default_enable_websocket")]
     pub enable_websocket: bool,
 
+    /// Only allow GET requests, reject all others (default: false)
+    /// When true, only GET requests are processed; POST, PUT, DELETE, etc. return 405 Method Not Allowed
+    /// Useful for static site prerendering where mutations shouldn't be allowed
+    #[serde(default = "default_forward_get_only")]
+    pub forward_get_only: bool,
+
     pub control_auth: Option<String>,
 }
 
 fn default_enable_websocket() -> bool {
     true
+}
+
+fn default_forward_get_only() -> bool {
+    false
 }
 
 fn default_control_port() -> u16 {
@@ -72,6 +82,7 @@ impl Default for ServerConfig {
             include_paths: vec![],
             exclude_paths: vec![],
             enable_websocket: default_enable_websocket(),
+            forward_get_only: default_forward_get_only(),
             control_auth: None,
         }
     }

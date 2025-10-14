@@ -57,6 +57,11 @@ exclude_paths = ["/api/admin/*", "/api/*/private", "POST *", "PUT *", "DELETE *"
 # Set to false to disable WebSocket/upgrade support and return 501 Not Implemented
 enable_websocket = true
 
+# Optional: Only allow GET requests, reject all others (default: false)
+# When enabled, only GET requests are processed; POST, PUT, DELETE, etc. return 405 Method Not Allowed
+# Useful for static site prerendering or development proxying where mutations shouldn't be allowed
+forward_get_only = false
+
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <token>
 control_auth = "your-secret-token-here"
