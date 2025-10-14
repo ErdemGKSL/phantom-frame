@@ -52,7 +52,7 @@ pub async fn proxy_handler(
         let path = req.uri().path();
         
         if state.config.enable_websocket {
-            tracing::info!("Upgrade request detected for {} {}, establishing direct proxy tunnel", method_str, path);
+            tracing::debug!("Upgrade request detected for {} {}, establishing direct proxy tunnel", method_str, path);
             return handle_upgrade_request(state, req).await;
         } else {
             tracing::warn!("Upgrade request detected for {} {} but WebSocket support is disabled", method_str, path);
@@ -94,12 +94,12 @@ pub async fn proxy_handler(
     // Try to get from cache first (only if caching is enabled for this path)
     if should_cache {
         if let Some(cached) = state.cache.get(&cache_key).await {
-            tracing::info!("Cache hit for: {} {}", method_str, cache_key);
+            tracing::debug!("Cache hit for: {} {}", method_str, cache_key);
             return Ok(build_response_from_cache(cached));
         }
-        tracing::info!("Cache miss for: {} {}, fetching from backend", method_str, cache_key);
+        tracing::debug!("Cache miss for: {} {}, fetching from backend", method_str, cache_key);
     } else {
-        tracing::info!("{} {} not cacheable (filtered), proxying directly", method_str, path);
+        tracing::debug!("{} {} not cacheable (filtered), proxying directly", method_str, path);
     }
     
     // Convert body to bytes to forward it
@@ -151,7 +151,7 @@ pub async fn proxy_handler(
             .cache
             .set(cache_key.clone(), cached_response.clone())
             .await;
-        tracing::info!("Cached response for: {} {}", method_str, cache_key);
+        tracing::debug!("Cached response for: {} {}", method_str, cache_key);
     }
 
     Ok(build_response_from_cache(cached_response))
@@ -219,7 +219,7 @@ async fn handle_upgrade_request(
     let conn_task = tokio::spawn(async move {
         match conn.with_upgrades().await {
             Ok(parts) => {
-                tracing::info!("Backend connection upgraded successfully");
+                tracing::debug!("Backend connection upgraded successfully");
                 Ok(parts)
             }
             Err(e) => {
@@ -253,7 +253,7 @@ async fn handle_upgrade_request(
     
     // Spawn a task to handle bidirectional streaming between client and backend
     tokio::spawn(async move {
-        tracing::info!("Starting upgrade tunnel establishment");
+        tracing::debug!("Starting upgrade tunnel establishment");
         
         // Wait for both upgrades to complete
         let (client_result, backend_result) = tokio::join!(
@@ -266,7 +266,7 @@ async fn handle_upgrade_request(
         
         match (client_result, backend_result) {
             (Ok(client_upgraded), Ok(backend_upgraded)) => {
-                tracing::info!("Both upgrades successful, establishing bidirectional tunnel");
+                tracing::debug!("Both upgrades successful, establishing bidirectional tunnel");
                 
                 // Wrap both in TokioIo for AsyncRead + AsyncWrite
                 let mut client_stream = TokioIo::new(client_upgraded);
@@ -275,7 +275,7 @@ async fn handle_upgrade_request(
                 // Create bidirectional tunnel
                 match tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream).await {
                     Ok((client_to_backend, backend_to_client)) => {
-                        tracing::info!(
+                        tracing::debug!(
                             "Tunnel closed gracefully. Transferred {} bytes client->backend, {} bytes backend->client",
                             client_to_backend,
                             backend_to_client
@@ -322,7 +322,7 @@ async fn handle_upgrade_request(
         );
     }
     
-    tracing::info!("Upgrade response sent to client, tunnel task spawned");
+    tracing::debug!("Upgrade response sent to client, tunnel task spawned");
     
     Ok(response)
 }

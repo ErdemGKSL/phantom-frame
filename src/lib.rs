@@ -146,11 +146,11 @@ fn spawn_refresh_listener(cache: CacheStore) {
         loop {
             match receiver.recv().await {
                 Ok(cache::RefreshMessage::All) => {
-                    tracing::info!("Cache refresh triggered: clearing all entries");
+                    tracing::debug!("Cache refresh triggered: clearing all entries");
                     cache.clear().await;
                 }
                 Ok(cache::RefreshMessage::Pattern(pattern)) => {
-                    tracing::info!("Cache refresh triggered: clearing entries matching pattern '{}'", pattern);
+                    tracing::debug!("Cache refresh triggered: clearing entries matching pattern '{}'", pattern);
                     cache.clear_by_pattern(&pattern).await;
                 }
                 Err(e) => {

@@ -121,7 +121,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phantom-frame = { version = "0.1.8" }
+phantom-frame = { version = "0.1.12" }
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8.6"
 ```
