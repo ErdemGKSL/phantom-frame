@@ -43,7 +43,24 @@ pub async fn proxy_handler(
     Extension(state): Extension<Arc<ProxyState>>,
     req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    // Extract request details first (before any borrowing)
+    // Check for upgrade requests FIRST (before consuming anything from the request)
+    // This is critical for WebSocket to work properly
+    let is_upgrade = is_upgrade_request(req.headers());
+    
+    if is_upgrade {
+        let method_str = req.method().as_str();
+        let path = req.uri().path();
+        
+        if state.config.enable_websocket {
+            tracing::info!("Upgrade request detected for {} {}, establishing direct proxy tunnel", method_str, path);
+            return handle_upgrade_request(state, req).await;
+        } else {
+            tracing::warn!("Upgrade request detected for {} {} but WebSocket support is disabled", method_str, path);
+            return Err(StatusCode::NOT_IMPLEMENTED);
+        }
+    }
+    
+    // Extract request details (only after we know it's not an upgrade request)
     let method = req.method().clone();
     let method_str = method.as_str();
     let uri = req.uri().clone();
@@ -55,16 +72,6 @@ pub async fn proxy_handler(
     if state.config.forward_get_only && method != axum::http::Method::GET {
         tracing::warn!("Non-GET request {} {} rejected (forward_get_only is enabled)", method_str, path);
         return Err(StatusCode::METHOD_NOT_ALLOWED);
-    }
-    
-    // Check if this is an upgrade request (WebSocket, etc.)
-    // If so, handle it via direct TCP proxying (if enabled)
-    if state.config.enable_websocket && is_upgrade_request(&headers) {
-        tracing::info!("Upgrade request detected for {} {}, establishing direct proxy tunnel", method_str, path);
-        return handle_upgrade_request(state, req).await;
-    } else if !state.config.enable_websocket && is_upgrade_request(&headers) {
-        tracing::warn!("Upgrade request detected for {} {} but WebSocket support is disabled", method_str, path);
-        return Err(StatusCode::NOT_IMPLEMENTED);
     }
     
     // Check if this path should be cached based on include/exclude patterns
@@ -198,20 +205,27 @@ async fn handle_upgrade_request(
             StatusCode::BAD_GATEWAY
         })?;
     
-    let backend_stream = TokioIo::new(backend_stream);
+    let backend_io = TokioIo::new(backend_stream);
     
-    // Build the backend request
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(backend_stream)
+    // Build the backend request with upgrade support
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(backend_io)
         .await
         .map_err(|e| {
             tracing::error!("Failed to handshake with backend: {}", e);
             StatusCode::BAD_GATEWAY
         })?;
     
-    // Spawn a task to poll the connection
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::error!("Connection to backend failed: {}", e);
+    // Spawn a task to poll the connection - this will handle the upgrade
+    let conn_task = tokio::spawn(async move {
+        match conn.with_upgrades().await {
+            Ok(parts) => {
+                tracing::info!("Backend connection upgraded successfully");
+                Ok(parts)
+            }
+            Err(e) => {
+                tracing::error!("Backend connection failed: {}", e);
+                Err(e)
+            }
         }
     });
     
@@ -234,6 +248,9 @@ async fn handle_upgrade_request(
     // Extract headers before moving backend_response
     let backend_headers = backend_response.headers().clone();
     
+    // Get the upgraded backend connection
+    let backend_upgrade = hyper::upgrade::on(backend_response);
+    
     // Spawn a task to handle bidirectional streaming between client and backend
     tokio::spawn(async move {
         tracing::info!("Starting upgrade tunnel establishment");
@@ -241,8 +258,11 @@ async fn handle_upgrade_request(
         // Wait for both upgrades to complete
         let (client_result, backend_result) = tokio::join!(
             client_upgrade,
-            hyper::upgrade::on(backend_response)
+            backend_upgrade
         );
+        
+        // Drop the connection task as we now have the upgraded streams
+        drop(conn_task);
         
         match (client_result, backend_result) {
             (Ok(client_upgraded), Ok(backend_upgraded)) => {
