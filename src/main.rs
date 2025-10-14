@@ -26,11 +26,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Proxy URL: {}", config.server.proxy_url);
     tracing::info!("Include paths: {:?}", config.server.include_paths);
     tracing::info!("Exclude paths: {:?}", config.server.exclude_paths);
+    tracing::info!("WebSocket support: {}", if config.server.enable_websocket { "enabled" } else { "disabled" });
 
     // Create proxy configuration
     let proxy_config = CreateProxyConfig::new(config.server.proxy_url.clone())
         .with_include_paths(config.server.include_paths.clone())
-        .with_exclude_paths(config.server.exclude_paths.clone());
+        .with_exclude_paths(config.server.exclude_paths.clone())
+        .with_websocket_enabled(config.server.enable_websocket);
 
     // Create proxy server with the config
     let (proxy_app, refresh_trigger) = phantom_frame::create_proxy(proxy_config);

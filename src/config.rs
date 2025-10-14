@@ -30,7 +30,17 @@ pub struct ServerConfig {
     #[serde(default)]
     pub exclude_paths: Vec<String>,
 
+    /// Enable WebSocket and protocol upgrade support (default: true)
+    /// When enabled, requests with Connection: Upgrade headers will bypass
+    /// the cache and establish a direct bidirectional TCP tunnel
+    #[serde(default = "default_enable_websocket")]
+    pub enable_websocket: bool,
+
     pub control_auth: Option<String>,
+}
+
+fn default_enable_websocket() -> bool {
+    true
 }
 
 fn default_control_port() -> u16 {
@@ -61,6 +71,7 @@ impl Default for ServerConfig {
             proxy_url: default_proxy_url(),
             include_paths: vec![],
             exclude_paths: vec![],
+            enable_websocket: default_enable_websocket(),
             control_auth: None,
         }
     }

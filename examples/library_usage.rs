@@ -19,7 +19,8 @@ async fn main() {
             "POST *".to_string(),  // Don't cache any POST requests
             "PUT *".to_string(),   // Don't cache any PUT requests
             "DELETE *".to_string(), // Don't cache any DELETE requests
-        ]);
+        ])
+        .with_websocket_enabled(true); // Enable WebSocket support (default: true)
 
     // Create proxy - proxy_url is the backend server to proxy requests to
     let (proxy_app, refresh_trigger): (Router, RefreshTrigger) = create_proxy(proxy_config);
@@ -49,6 +50,7 @@ async fn main() {
     println!("Caching paths: /api/*, /public/*, GET /admin/stats");
     println!("Excluding: /api/admin/*, POST *, PUT *, DELETE *");
     println!("Note: Only GET requests will be cached (POST/PUT/DELETE are excluded)");
+    println!("WebSocket support: enabled");
 
     axum::serve(listener, proxy_app).await.unwrap();
 }

@@ -20,6 +20,12 @@ include_paths = ["/api/*", "/public/*", "GET /admin/stats"]
 # Exclude patterns override include patterns
 exclude_paths = ["/api/admin/*", "/api/*/private", "POST *", "PUT *", "DELETE *"]
 
+# Optional: Enable WebSocket and protocol upgrade support (default: true)
+# When enabled, requests with Connection: Upgrade headers will bypass the cache
+# and establish a direct bidirectional TCP tunnel to the backend
+# Set to false to disable WebSocket/upgrade support and return 501 Not Implemented
+enable_websocket = true
+
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <control_auth>
 # control_auth = "your-secret-token-here"

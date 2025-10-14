@@ -14,6 +14,7 @@ A high-performance prerendering proxy engine written in Rust. Cache and serve pr
 - 🔐 **Optional authentication** - Secure control endpoints with bearer token auth
 - ⚡ **Async/await** - Built on Tokio and Axum for high performance
 - 📦 **Easy integration** - Simple API for library usage
+- 🌐 **WebSocket support** - Automatic detection and proxying of WebSocket and other protocol upgrade connections with bidirectional streaming
 
 ## Usage
 
@@ -49,6 +50,12 @@ include_paths = ["/api/*", "/public/*", "GET /admin/stats"]
 # Supports method prefixes: "POST /api/*", "PUT *", etc.
 # Exclude patterns override include patterns
 exclude_paths = ["/api/admin/*", "/api/*/private", "POST *", "PUT *", "DELETE *"]
+
+# Optional: Enable WebSocket and protocol upgrade support (default: true)
+# When enabled, requests with Connection: Upgrade headers will bypass the cache
+# and establish a direct bidirectional TCP tunnel to the backend
+# Set to false to disable WebSocket/upgrade support and return 501 Not Implemented
+enable_websocket = true
 
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <token>
@@ -134,7 +141,8 @@ async fn main() {
             "POST *".to_string(),   // Don't cache any POST requests
             "PUT *".to_string(),    // Don't cache any PUT requests  
             "DELETE *".to_string(), // Don't cache any DELETE requests
-        ]);
+        ])
+        .with_websocket_enabled(true); // Enable WebSocket support (default: true)
     
     // Create proxy - returns router and refresh trigger
     let (proxy_app, refresh_trigger): (Router, RefreshTrigger) = 
@@ -263,6 +271,75 @@ tokio::spawn(async move {
 - Multiple wildcards are supported (e.g., `*/api/*/users/*`)
 - Exact matches work without wildcards (e.g., `GET:/api/users`)
 
+## WebSocket and Protocol Upgrade Support
+
+phantom-frame automatically detects and handles WebSocket connections and other HTTP protocol upgrades (e.g., HTTP/2, Server-Sent Events with upgrade):
+
+### How it works
+
+1. **Automatic Detection**: Any request with `Connection: Upgrade` or `Upgrade` headers is automatically detected
+2. **Direct Proxying**: Upgrade requests bypass the cache entirely and establish a direct bidirectional TCP tunnel
+3. **Full Transparency**: The WebSocket handshake is completed between client and backend, and all data flows directly through the proxy
+4. **Long-lived Connections**: The tunnel remains open for the lifetime of the connection, supporting real-time bidirectional communication
+
+### Example
+
+Your backend WebSocket endpoints will work seamlessly through phantom-frame:
+
+```javascript
+// Frontend code - connect to WebSocket through the proxy
+const ws = new WebSocket('ws://localhost:3000/api/ws');
+
+ws.onopen = () => {
+  console.log('Connected');
+  ws.send('Hello Server!');
+};
+
+ws.onmessage = (event) => {
+  console.log('Received:', event.data);
+};
+```
+
+```rust
+// Backend code - your WebSocket handler runs as normal
+// phantom-frame will tunnel the connection transparently
+use axum::{
+    routing::get,
+    extract::ws::{WebSocket, WebSocketUpgrade},
+    Router,
+};
+
+async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(handle_socket)
+}
+
+async fn handle_socket(mut socket: WebSocket) {
+    while let Some(msg) = socket.recv().await {
+        // Handle WebSocket messages
+    }
+}
+```
+
+**Note**: WebSocket and upgrade connections are never cached, as they are inherently stateful and bidirectional. The proxy acts as a transparent tunnel for these connections.
+
+### Disabling WebSocket Support
+
+If you don't need WebSocket support or want to explicitly block protocol upgrades, you can disable it:
+
+**In config.toml:**
+```toml
+[server]
+enable_websocket = false  # Disable WebSocket support
+```
+
+**In library mode:**
+```rust
+let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
+    .with_websocket_enabled(false);  // Disable WebSocket support
+```
+
+When disabled, any upgrade request (WebSocket, etc.) will receive a `501 Not Implemented` response.
+
 ## Building
 
 ```bash
@@ -282,6 +359,7 @@ cargo run --example library_usage
 2. **Cache Miss**: If not cached, it fetches from the backend, caches the response, and returns it
 3. **Cache Hit**: If cached, it serves the cached content immediately
 4. **Cache Refresh**: The cache can be invalidated via the control endpoint or programmatically
+5. **WebSocket/Upgrade Handling**: Requests with `Connection: Upgrade` or `Upgrade` headers (e.g., WebSocket) are automatically detected and bypass the cache entirely. Instead, a direct bidirectional TCP tunnel is established between the client and backend, allowing long-lived connections to work seamlessly.
 
 ## API Reference
 
@@ -305,6 +383,7 @@ Configuration struct for creating a proxy.
 - **Methods**:
   - `with_include_paths(paths: Vec<String>)` - Set paths to include in caching (supports method prefixes like "GET /api/*")
   - `with_exclude_paths(paths: Vec<String>)` - Set paths to exclude from caching (supports method prefixes like "POST *")
+  - `with_websocket_enabled(enabled: bool)` - Enable or disable WebSocket and protocol upgrade support (default: true)
   - `with_cache_key_fn(f: impl Fn(&RequestInfo) -> String)` - Set custom cache key generator
 
 #### `create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger)`

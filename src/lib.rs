@@ -37,6 +37,11 @@ pub struct CreateProxyConfig {
     /// Exclude overrides include
     pub exclude_paths: Vec<String>,
     
+    /// Enable WebSocket and protocol upgrade support (default: true)
+    /// When enabled, requests with Connection: Upgrade headers will bypass
+    /// the cache and establish a direct bidirectional TCP tunnel
+    pub enable_websocket: bool,
+    
     /// Custom cache key generator
     /// Takes request info and returns a cache key
     /// Default: method + path + query string
@@ -50,6 +55,7 @@ impl CreateProxyConfig {
             proxy_url,
             include_paths: vec![],
             exclude_paths: vec![],
+            enable_websocket: true,
             cache_key_fn: Arc::new(|req_info| {
                 if req_info.query.is_empty() {
                     format!("{}:{}", req_info.method, req_info.path)
@@ -69,6 +75,12 @@ impl CreateProxyConfig {
     /// Set exclude paths
     pub fn with_exclude_paths(mut self, paths: Vec<String>) -> Self {
         self.exclude_paths = paths;
+        self
+    }
+    
+    /// Enable or disable WebSocket and protocol upgrade support
+    pub fn with_websocket_enabled(mut self, enabled: bool) -> Self {
+        self.enable_websocket = enabled;
         self
     }
     

@@ -1,6 +1,6 @@
 [package]
 name = "phantom-frame"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["Erdem Göksel <erdem.goksel.dev@gmail.com>"]
 description = "A high-performance prerendering proxy engine with caching support"
@@ -24,6 +24,9 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"
 tokio-util = "0.7"
+hyper = { version = "1.5", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [lib]
 name = "phantom_frame"
