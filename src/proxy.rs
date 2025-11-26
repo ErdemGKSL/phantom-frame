@@ -91,6 +91,14 @@ pub async fn proxy_handler(
     };
     let cache_key = (state.config.cache_key_fn)(&req_info);
 
+    // Try to get 404 cache first (available even if should_cache is false)
+    if state.config.cache_404_capacity > 0 {
+        if let Some(cached) = state.cache.get_404(&cache_key).await {
+            tracing::debug!("404 cache hit for: {} {}", method_str, cache_key);
+            return Ok(build_response_from_cache(cached));
+        }
+    }
+
     // Try to get from cache first (only if caching is enabled for this path)
     if should_cache {
         if let Some(cached) = state.cache.get(&cache_key).await {
@@ -146,7 +154,33 @@ pub async fn proxy_handler(
         status,
     };
 
-    if should_cache {
+    // Determine if this should be cached as a 404 (either by status or by meta tag if enabled)
+    let mut is_404 = status == 404;
+    if !is_404 && state.config.use_404_meta {
+        // check if body contains special meta tag
+        if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
+            // look for name="phantom-404" or name='phantom-404' AND content="true" or content='true'
+            let name_dbl = "name=\"phantom-404\"";
+            let name_sgl = "name='phantom-404'";
+            let content_dbl = "content=\"true\"";
+            let content_sgl = "content='true'";
+
+            if (body_str.contains(name_dbl) || body_str.contains(name_sgl))
+                && (body_str.contains(content_dbl) || body_str.contains(content_sgl))
+            {
+                is_404 = true;
+            }
+        }
+    }
+
+    if is_404 && state.config.cache_404_capacity > 0 {
+        // store in 404 cache
+        state
+            .cache
+            .set_404(cache_key.clone(), cached_response.clone())
+            .await;
+        tracing::debug!("Cached 404 response for: {} {}", method_str, cache_key);
+    } else if should_cache {
         state
             .cache
             .set(cache_key.clone(), cached_response.clone())

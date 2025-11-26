@@ -51,6 +51,12 @@ pub struct CreateProxyConfig {
     /// Takes request info and returns a cache key
     /// Default: method + path + query string
     pub cache_key_fn: Arc<dyn Fn(&RequestInfo) -> String + Send + Sync>,
+    /// Capacity for special 404 cache. When 0, 404 caching is disabled.
+    pub cache_404_capacity: usize,
+
+    /// When true, treat a response containing the meta tag `<meta name="phantom-404" content="true">` as a 404
+    /// This is an optional performance-affecting fallback to detect framework-generated 404 pages.
+    pub use_404_meta: bool,
 }
 
 impl CreateProxyConfig {
@@ -69,6 +75,8 @@ impl CreateProxyConfig {
                     format!("{}:{}?{}", req_info.method, req_info.path, req_info.query)
                 }
             }),
+            cache_404_capacity: 100,
+            use_404_meta: false,
         }
     }
     
@@ -104,13 +112,25 @@ impl CreateProxyConfig {
         self.cache_key_fn = Arc::new(f);
         self
     }
+
+    /// Set 404 cache capacity. When 0, 404 caching is disabled.
+    pub fn with_cache_404_capacity(mut self, capacity: usize) -> Self {
+        self.cache_404_capacity = capacity;
+        self
+    }
+
+    /// Treat pages that include the special meta tag as 404 pages
+    pub fn with_use_404_meta(mut self, enabled: bool) -> Self {
+        self.use_404_meta = enabled;
+        self
+    }
 }
 
 /// The main library interface for using phantom-frame as a library
 /// Returns a proxy handler function and a refresh trigger
 pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
     let refresh_trigger = RefreshTrigger::new();
-    let cache = CacheStore::new(refresh_trigger.clone());
+    let cache = CacheStore::new(refresh_trigger.clone(), config.cache_404_capacity);
 
     // Spawn background task to listen for refresh events
     spawn_refresh_listener(cache.clone());
@@ -126,7 +146,7 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
 
 /// Create a proxy handler with an existing refresh trigger
 pub fn create_proxy_with_trigger(config: CreateProxyConfig, refresh_trigger: RefreshTrigger) -> Router {
-    let cache = CacheStore::new(refresh_trigger);
+    let cache = CacheStore::new(refresh_trigger, 100);
     
     // Spawn background task to listen for refresh events
     spawn_refresh_listener(cache.clone());

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -93,6 +93,10 @@ fn matches_pattern(key: &str, pattern: &str) -> bool {
 #[derive(Clone)]
 pub struct CacheStore {
     store: Arc<RwLock<HashMap<String, CachedResponse>>>,
+    // 404-specific store with bounded capacity and FIFO eviction
+    store_404: Arc<RwLock<HashMap<String, CachedResponse>>>,
+    keys_404: Arc<RwLock<VecDeque<String>>>,
+    cache_404_capacity: usize,
     refresh_trigger: RefreshTrigger,
 }
 
@@ -104,9 +108,12 @@ pub struct CachedResponse {
 }
 
 impl CacheStore {
-    pub fn new(refresh_trigger: RefreshTrigger) -> Self {
+    pub fn new(refresh_trigger: RefreshTrigger, cache_404_capacity: usize) -> Self {
         Self {
             store: Arc::new(RwLock::new(HashMap::new())),
+            store_404: Arc::new(RwLock::new(HashMap::new())),
+            keys_404: Arc::new(RwLock::new(VecDeque::new())),
+            cache_404_capacity,
             refresh_trigger,
         }
     }
@@ -116,20 +123,66 @@ impl CacheStore {
         store.get(key).cloned()
     }
 
+    /// Get a 404 cached response (if present)
+    pub async fn get_404(&self, key: &str) -> Option<CachedResponse> {
+        let store = self.store_404.read().await;
+        store.get(key).cloned()
+    }
+
     pub async fn set(&self, key: String, response: CachedResponse) {
         let mut store = self.store.write().await;
         store.insert(key, response);
     }
 
+    /// Set a 404 cached response. Bounded by `cache_404_capacity` and evict the oldest entries when limit reached.
+    pub async fn set_404(&self, key: String, response: CachedResponse) {
+        if self.cache_404_capacity == 0 {
+            // 404 caching disabled
+            return;
+        }
+
+        let mut store = self.store_404.write().await;
+        let mut keys = self.keys_404.write().await;
+
+        // If key already exists, remove it from its position in keys and re-add to the back
+        if store.contains_key(&key) {
+            // remove the key from keys deque (linear scan; acceptable for bounded deque)
+            if let Some(pos) = keys.iter().position(|k| k == &key) {
+                keys.remove(pos);
+            }
+        }
+
+        // Insert into store and push back in keys
+        store.insert(key.clone(), response);
+        keys.push_back(key.clone());
+
+        // Evict oldest items if capacity exceeded
+        while keys.len() > self.cache_404_capacity {
+            if let Some(old_key) = keys.pop_front() {
+                store.remove(&old_key);
+            }
+        }
+    }
+
     pub async fn clear(&self) {
         let mut store = self.store.write().await;
         store.clear();
+        let mut store404 = self.store_404.write().await;
+        store404.clear();
+        let mut keys = self.keys_404.write().await;
+        keys.clear();
     }
 
     /// Clear cache entries matching a pattern (supports wildcards)
     pub async fn clear_by_pattern(&self, pattern: &str) {
         let mut store = self.store.write().await;
         store.retain(|key, _| !matches_pattern(key, pattern));
+
+        let mut store404 = self.store_404.write().await;
+        let mut keys = self.keys_404.write().await;
+        // Remove matching from store_404 and keys
+        store404.retain(|key, _| !matches_pattern(key, pattern));
+        keys.retain(|k| !matches_pattern(k, pattern));
     }
 
     pub fn refresh_trigger(&self) -> &RefreshTrigger {
@@ -139,6 +192,12 @@ impl CacheStore {
     /// Get the number of cached items
     pub async fn size(&self) -> usize {
         let store = self.store.read().await;
+        store.len()
+    }
+
+    /// Size of 404 cache
+    pub async fn size_404(&self) -> usize {
+        let store = self.store_404.read().await;
         store.len()
     }
 }
@@ -185,5 +244,44 @@ mod tests {
     fn test_matches_pattern_wildcard_only() {
         assert!(matches_pattern("GET:/api/users", "*"));
         assert!(matches_pattern("POST:/anything", "*"));
+    }
+
+    #[tokio::test]
+    async fn test_404_cache_set_get_and_eviction() {
+        let trigger = RefreshTrigger::new();
+        // capacity 2 for quicker eviction
+        let store = CacheStore::new(trigger, 2);
+
+        let resp1 = CachedResponse { body: vec![1], headers: HashMap::new(), status: 404 };
+        let resp2 = CachedResponse { body: vec![2], headers: HashMap::new(), status: 404 };
+        let resp3 = CachedResponse { body: vec![3], headers: HashMap::new(), status: 404 };
+
+        // Set two 404 entries
+        store.set_404("GET:/notfound1".to_string(), resp1.clone()).await;
+        store.set_404("GET:/notfound2".to_string(), resp2.clone()).await;
+
+        assert_eq!(store.size_404().await, 2);
+        assert_eq!(store.get_404("GET:/notfound1").await.unwrap().body, vec![1]);
+
+        // Add third entry - should evict oldest (notfound1)
+        store.set_404("GET:/notfound3".to_string(), resp3.clone()).await;
+        assert_eq!(store.size_404().await, 2);
+        assert!(store.get_404("GET:/notfound1").await.is_none());
+        assert_eq!(store.get_404("GET:/notfound2").await.unwrap().body, vec![2]);
+        assert_eq!(store.get_404("GET:/notfound3").await.unwrap().body, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn test_clear_by_pattern_removes_404_entries() {
+        let trigger = RefreshTrigger::new();
+        let store = CacheStore::new(trigger, 10);
+
+        let resp = CachedResponse { body: vec![1], headers: HashMap::new(), status: 404 };
+        store.set_404("GET:/api/notfound".to_string(), resp.clone()).await;
+        store.set_404("GET:/api/another".to_string(), resp.clone()).await;
+        assert_eq!(store.size_404().await, 2);
+
+        store.clear_by_pattern("GET:/api/*").await;
+        assert_eq!(store.size_404().await, 0);
     }
 }

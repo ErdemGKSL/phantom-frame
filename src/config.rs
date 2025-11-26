@@ -43,6 +43,16 @@ pub struct ServerConfig {
     pub forward_get_only: bool,
 
     pub control_auth: Option<String>,
+
+    /// Capacity for the 404 cache (default: 100)
+    /// Limits the number of different 404 responses cached to prevent memory abuse
+    #[serde(default = "default_cache_404_capacity")]
+    pub cache_404_capacity: usize,
+
+    /// Detect 404 pages via meta tag in HTML body in addition to HTTP status
+    /// This lowers performance and should be enabled only when needed.
+    #[serde(default = "default_use_404_meta")]
+    pub use_404_meta: bool,
 }
 
 fn default_enable_websocket() -> bool {
@@ -65,6 +75,14 @@ fn default_proxy_url() -> String {
     "http://localhost:8080".to_string()
 }
 
+fn default_cache_404_capacity() -> usize {
+    100
+}
+
+fn default_use_404_meta() -> bool {
+    false
+}
+
 impl Config {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -84,6 +102,8 @@ impl Default for ServerConfig {
             enable_websocket: default_enable_websocket(),
             forward_get_only: default_forward_get_only(),
             control_auth: None,
+            cache_404_capacity: default_cache_404_capacity(),
+            use_404_meta: default_use_404_meta(),
         }
     }
 }

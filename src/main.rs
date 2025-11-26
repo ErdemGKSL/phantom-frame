@@ -35,6 +35,9 @@ async fn main() -> anyhow::Result<()> {
         .with_exclude_paths(config.server.exclude_paths.clone())
         .with_websocket_enabled(config.server.enable_websocket)
         .with_forward_get_only(config.server.forward_get_only);
+    let proxy_config = proxy_config
+        .with_cache_404_capacity(config.server.cache_404_capacity)
+        .with_use_404_meta(config.server.use_404_meta);
 
     // Create proxy server with the config
     let (proxy_app, refresh_trigger) = phantom_frame::create_proxy(proxy_config);
