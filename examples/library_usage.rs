@@ -1,7 +1,9 @@
 use axum::Router;
 use phantom_frame::{
-    cache::RefreshTrigger, create_proxy, CacheStrategy, CompressStrategy, CreateProxyConfig,
+    cache::{CacheStorageMode, RefreshTrigger},
+    create_proxy, CacheStrategy, CompressStrategy, CreateProxyConfig,
 };
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
@@ -24,6 +26,8 @@ async fn main() {
         ])
         .caching_strategy(CacheStrategy::None)
         .compression_strategy(CompressStrategy::Brotli)
+        .with_cache_storage_mode(CacheStorageMode::Filesystem)
+        .with_cache_directory(PathBuf::from("./.phantom-frame-cache"))
         .with_websocket_enabled(true); // Enable WebSocket support (default: true)
 
     // Create proxy - proxy_url is the backend server to proxy requests to
@@ -55,6 +59,7 @@ async fn main() {
     println!("Excluding: /api/admin/*, POST *, PUT *, DELETE *");
     println!("Cache strategy: none (proxy-only mode)");
     println!("Compression strategy: brotli (applies only to cached responses)");
+    println!("Cache storage mode: filesystem (custom cache directory)");
     println!("Note: Cache reads and writes are disabled in this example");
     println!("WebSocket support: enabled");
 

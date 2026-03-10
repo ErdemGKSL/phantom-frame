@@ -1,6 +1,6 @@
 [package]
 name = "phantom-frame"
-version = "0.1.16"
+version = "0.1.17"
 edition = "2021"
 authors = ["Erdem Göksel <erdem.goksel.dev@gmail.com>"]
 description = "A high-performance prerendering proxy engine with caching support"

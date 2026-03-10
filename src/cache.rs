@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::compression::ContentEncoding;
-use crate::CacheStorageMode;
+pub use crate::CacheStorageMode;
 
 static BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -535,7 +535,6 @@ impl Default for RefreshTrigger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CacheStorageMode;
 
     fn unique_test_directory(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
