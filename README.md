@@ -220,7 +220,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phantom-frame = { version = "0.1.15" }
+phantom-frame = { version = "0.1.16" }
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8.6"
 ```
