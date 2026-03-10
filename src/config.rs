@@ -1,3 +1,4 @@
+use crate::CacheStrategy;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -53,6 +54,10 @@ pub struct ServerConfig {
     /// This lowers performance and should be enabled only when needed.
     #[serde(default = "default_use_404_meta")]
     pub use_404_meta: bool,
+
+    /// Controls which response types should be cached.
+    #[serde(default)]
+    pub cache_strategy: CacheStrategy,
 }
 
 fn default_enable_websocket() -> bool {
@@ -104,6 +109,29 @@ impl Default for ServerConfig {
             control_auth: None,
             cache_404_capacity: default_cache_404_capacity(),
             use_404_meta: default_use_404_meta(),
+            cache_strategy: CacheStrategy::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_defaults_cache_strategy_to_all() {
+        let config: Config =
+            toml::from_str("[server]\nproxy_url = \"http://localhost:8080\"\n").unwrap();
+        assert_eq!(config.server.cache_strategy, CacheStrategy::All);
+    }
+
+    #[test]
+    fn test_config_parses_cache_strategy() {
+        let config: Config = toml::from_str(
+            "[server]\nproxy_url = \"http://localhost:8080\"\ncache_strategy = \"none\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.server.cache_strategy, CacheStrategy::None);
     }
 }

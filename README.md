@@ -9,6 +9,7 @@ A high-performance prerendering proxy engine written in Rust. Cache and serve pr
 ## Features
 
 - 🚀 **Fast caching proxy** - Cache prerendered content and serve it instantly
+- 🎛️ **Flexible cache strategies** - Disable caching entirely or target HTML, images, and assets only
 - 🔧 **Dual mode operation** - Run as standalone HTTP server or integrate as a library
 - 🔄 **Dynamic cache refresh** - Trigger cache invalidation via control endpoint or programmatically
 - 🔐 **Optional authentication** - Secure control endpoints with bearer token auth
@@ -62,9 +63,38 @@ enable_websocket = true
 # Useful for static site prerendering or development proxying where mutations shouldn't be allowed
 forward_get_only = false
 
+# Optional: Control which response types are cached (default: "all")
+# Available values: "all", "none", "only_html", "no_images", "only_images", "only_assets"
+# Use "none" when you want phantom-frame to behave like a plain proxy in development.
+cache_strategy = "all"
+
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <token>
 control_auth = "your-secret-token-here"
+```
+
+#### Cache Strategies
+
+Use `cache_strategy` to control which backend responses are stored:
+
+- `all`: Preserve the current behavior and cache every response that passes your include/exclude rules.
+- `none`: Disable cache reads and writes entirely, including the 404 cache. Useful for dev mode or plain proxying.
+- `only_html`: Cache HTML documents only.
+- `no_images`: Cache everything except `image/*` responses.
+- `only_images`: Cache `image/*` responses only.
+- `only_assets`: Cache static/application assets such as CSS, JavaScript, JSON, fonts, WebAssembly, XML, and images.
+
+Examples:
+
+```toml
+# Run as an uncached development proxy
+cache_strategy = "none"
+
+# Cache HTML pages only but still proxy assets through
+cache_strategy = "only_html"
+
+# Cache scripts, styles, fonts, JSON, and images but skip HTML documents
+cache_strategy = "only_assets"
 ```
 
 #### Path Filtering
@@ -121,7 +151,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phantom-frame = { version = "0.1.12" }
+phantom-frame = { version = "0.1.14" }
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8.6"
 ```
@@ -129,7 +159,12 @@ axum = "0.8.6"
 Use in your code:
 
 ```rust
-use phantom_frame::{create_proxy, cache::RefreshTrigger, CreateProxyConfig};
+use phantom_frame::{
+    create_proxy,
+    cache::RefreshTrigger,
+    CacheStrategy,
+    CreateProxyConfig,
+};
 use axum::Router;
 
 #[tokio::main]
@@ -147,6 +182,7 @@ async fn main() {
             "PUT *".to_string(),    // Don't cache any PUT requests  
             "DELETE *".to_string(), // Don't cache any DELETE requests
         ])
+        .caching_strategy(CacheStrategy::OnlyHtml)
         .with_websocket_enabled(true); // Enable WebSocket support (default: true)
     
     // Create proxy - returns router and refresh trigger
@@ -173,6 +209,15 @@ async fn main() {
     
     axum::serve(listener, proxy_app).await.unwrap();
 }
+```
+
+For dev mode or plain proxying without any cache reads/writes:
+
+```rust
+use phantom_frame::{CacheStrategy, CreateProxyConfig};
+
+let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
+    .caching_strategy(CacheStrategy::None);
 ```
 
 #### Custom Cache Key Function

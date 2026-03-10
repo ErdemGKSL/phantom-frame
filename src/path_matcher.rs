@@ -10,10 +10,12 @@
 ///   "GET *" -> (Some("GET"), "*")
 fn parse_pattern(pattern: &str) -> (Option<&str>, &str) {
     let pattern = pattern.trim();
-    
+
     // Check if pattern starts with an HTTP method
-    let methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"];
-    
+    let methods = [
+        "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
+    ];
+
     for method in &methods {
         if let Some(rest) = pattern.strip_prefix(method) {
             // Must be followed by whitespace
@@ -23,7 +25,7 @@ fn parse_pattern(pattern: &str) -> (Option<&str>, &str) {
             }
         }
     }
-    
+
     (None, pattern)
 }
 
@@ -42,7 +44,7 @@ pub fn matches_pattern(path: &str, pattern: &str) -> bool {
 ///   matches_pattern_with_method(Some("GET"), "/api/users", "/api/*") -> true (no method constraint)
 pub fn matches_pattern_with_method(method: Option<&str>, path: &str, pattern: &str) -> bool {
     let (pattern_method, path_pattern) = parse_pattern(pattern);
-    
+
     // If pattern specifies a method, it must match
     if let Some(required_method) = pattern_method {
         if let Some(actual_method) = method {
@@ -54,7 +56,7 @@ pub fn matches_pattern_with_method(method: Option<&str>, path: &str, pattern: &s
             return false;
         }
     }
-    
+
     // Now match the path part using the existing logic
     matches_path_pattern(path, path_pattern)
 }
@@ -63,14 +65,14 @@ pub fn matches_pattern_with_method(method: Option<&str>, path: &str, pattern: &s
 fn matches_path_pattern(path: &str, pattern: &str) -> bool {
     // Split pattern by * to get segments
     let segments: Vec<&str> = pattern.split('*').collect();
-    
+
     if segments.len() == 1 {
         // No wildcards, exact match
         return path == pattern;
     }
-    
+
     let mut current_pos = 0;
-    
+
     for (i, segment) in segments.iter().enumerate() {
         if i == 0 {
             // First segment must match at the start
@@ -102,7 +104,7 @@ fn matches_path_pattern(path: &str, pattern: &str) -> bool {
             }
         }
     }
-    
+
     true
 }
 
@@ -125,19 +127,19 @@ pub fn should_cache_path(
             }
         }
     }
-    
+
     // If include_paths is empty, include everything (that wasn't excluded)
     if include_paths.is_empty() {
         return true;
     }
-    
+
     // Check if path matches any include pattern
     for pattern in include_paths {
         if matches_pattern_with_method(Some(method), path, pattern) {
             return true;
         }
     }
-    
+
     false
 }
 
@@ -196,58 +198,127 @@ mod tests {
     fn test_should_cache_path_include_only() {
         let include = vec!["/api/*".to_string(), "/public/*".to_string()];
         let exclude = vec![];
-        
+
         assert!(should_cache_path("GET", "/api/users", &include, &exclude));
-        assert!(should_cache_path("GET", "/public/index.html", &include, &exclude));
-        assert!(!should_cache_path("GET", "/private/data", &include, &exclude));
+        assert!(should_cache_path(
+            "GET",
+            "/public/index.html",
+            &include,
+            &exclude
+        ));
+        assert!(!should_cache_path(
+            "GET",
+            "/private/data",
+            &include,
+            &exclude
+        ));
     }
 
     #[test]
     fn test_should_cache_path_exclude_only() {
         let include = vec![];
         let exclude = vec!["/admin/*".to_string(), "/private/*".to_string()];
-        
+
         assert!(should_cache_path("GET", "/api/users", &include, &exclude));
-        assert!(!should_cache_path("GET", "/admin/dashboard", &include, &exclude));
-        assert!(!should_cache_path("GET", "/private/data", &include, &exclude));
+        assert!(!should_cache_path(
+            "GET",
+            "/admin/dashboard",
+            &include,
+            &exclude
+        ));
+        assert!(!should_cache_path(
+            "GET",
+            "/private/data",
+            &include,
+            &exclude
+        ));
     }
 
     #[test]
     fn test_should_cache_path_exclude_overrides_include() {
         let include = vec!["/api/*".to_string()];
         let exclude = vec!["/api/admin/*".to_string()];
-        
+
         assert!(should_cache_path("GET", "/api/users", &include, &exclude));
-        assert!(!should_cache_path("GET", "/api/admin/users", &include, &exclude));
+        assert!(!should_cache_path(
+            "GET",
+            "/api/admin/users",
+            &include,
+            &exclude
+        ));
     }
 
     #[test]
     fn test_method_pattern_matching() {
         // Test exact method match
-        assert!(matches_pattern_with_method(Some("POST"), "/api/users", "POST /api/users"));
-        assert!(!matches_pattern_with_method(Some("GET"), "/api/users", "POST /api/users"));
-        
+        assert!(matches_pattern_with_method(
+            Some("POST"),
+            "/api/users",
+            "POST /api/users"
+        ));
+        assert!(!matches_pattern_with_method(
+            Some("GET"),
+            "/api/users",
+            "POST /api/users"
+        ));
+
         // Test method with wildcard
-        assert!(matches_pattern_with_method(Some("POST"), "/api/users", "POST /api/*"));
-        assert!(matches_pattern_with_method(Some("POST"), "/api/posts", "POST /api/*"));
-        assert!(!matches_pattern_with_method(Some("POST"), "/not-api/posts", "POST /api/*"));
-        assert!(!matches_pattern_with_method(Some("GET"), "/api/users", "POST /api/*"));
-        
+        assert!(matches_pattern_with_method(
+            Some("POST"),
+            "/api/users",
+            "POST /api/*"
+        ));
+        assert!(matches_pattern_with_method(
+            Some("POST"),
+            "/api/posts",
+            "POST /api/*"
+        ));
+        assert!(!matches_pattern_with_method(
+            Some("POST"),
+            "/not-api/posts",
+            "POST /api/*"
+        ));
+        assert!(!matches_pattern_with_method(
+            Some("GET"),
+            "/api/users",
+            "POST /api/*"
+        ));
+
         // Test wildcard method matching (pattern without method should match any)
-        assert!(matches_pattern_with_method(Some("GET"), "/api/users", "/api/*"));
-        assert!(matches_pattern_with_method(Some("POST"), "/api/users", "/api/*"));
-        
+        assert!(matches_pattern_with_method(
+            Some("GET"),
+            "/api/users",
+            "/api/*"
+        ));
+        assert!(matches_pattern_with_method(
+            Some("POST"),
+            "/api/users",
+            "/api/*"
+        ));
+
         // Test "POST *" pattern
-        assert!(matches_pattern_with_method(Some("POST"), "/anything", "POST *"));
-        assert!(matches_pattern_with_method(Some("POST"), "/api/users/123", "POST *"));
-        assert!(!matches_pattern_with_method(Some("GET"), "/anything", "POST *"));
+        assert!(matches_pattern_with_method(
+            Some("POST"),
+            "/anything",
+            "POST *"
+        ));
+        assert!(matches_pattern_with_method(
+            Some("POST"),
+            "/api/users/123",
+            "POST *"
+        ));
+        assert!(!matches_pattern_with_method(
+            Some("GET"),
+            "/anything",
+            "POST *"
+        ));
     }
 
     #[test]
     fn test_should_cache_with_method_filters() {
         let include = vec!["/api/*".to_string()];
         let exclude = vec!["POST /api/*".to_string(), "PUT /api/*".to_string()];
-        
+
         // GET should be cached
         assert!(should_cache_path("GET", "/api/users", &include, &exclude));
         // POST should not be cached (excluded)
@@ -255,18 +326,23 @@ mod tests {
         // PUT should not be cached (excluded)
         assert!(!should_cache_path("PUT", "/api/users", &include, &exclude));
         // DELETE should be cached (not excluded)
-        assert!(should_cache_path("DELETE", "/api/users", &include, &exclude));
+        assert!(should_cache_path(
+            "DELETE",
+            "/api/users",
+            &include,
+            &exclude
+        ));
     }
 
     #[test]
     fn test_exclude_all_posts() {
         let include = vec![];
         let exclude = vec!["POST *".to_string()];
-        
+
         // All POST requests should be excluded
         assert!(!should_cache_path("POST", "/api/users", &include, &exclude));
         assert!(!should_cache_path("POST", "/anything", &include, &exclude));
-        
+
         // Other methods should be cached
         assert!(should_cache_path("GET", "/api/users", &include, &exclude));
         assert!(should_cache_path("PUT", "/api/users", &include, &exclude));
@@ -276,11 +352,11 @@ mod tests {
     fn test_include_only_get_requests() {
         let include = vec!["GET *".to_string()];
         let exclude = vec![];
-        
+
         // Only GET requests should be included
         assert!(should_cache_path("GET", "/api/users", &include, &exclude));
         assert!(should_cache_path("GET", "/anything", &include, &exclude));
-        
+
         // Other methods should not be cached
         assert!(!should_cache_path("POST", "/api/users", &include, &exclude));
         assert!(!should_cache_path("PUT", "/api/users", &include, &exclude));

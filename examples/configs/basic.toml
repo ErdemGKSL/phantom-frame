@@ -31,6 +31,10 @@ enable_websocket = true
 # Useful for static site prerendering or development proxying where mutations shouldn't be allowed
 # forward_get_only = false
 
+# Optional: Control which response types are cached (default: "all")
+# Available values: "all", "none", "only_html", "no_images", "only_images", "only_assets"
+# cache_strategy = "none"
+
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <control_auth>
 # control_auth = "your-secret-token-here"

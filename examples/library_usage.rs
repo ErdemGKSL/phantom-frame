@@ -1,5 +1,5 @@
 use axum::Router;
-use phantom_frame::{cache::RefreshTrigger, create_proxy, CreateProxyConfig};
+use phantom_frame::{cache::RefreshTrigger, create_proxy, CacheStrategy, CreateProxyConfig};
 
 #[tokio::main]
 async fn main() {
@@ -16,10 +16,11 @@ async fn main() {
         ])
         .with_exclude_paths(vec![
             "/api/admin/*".to_string(),
-            "POST *".to_string(),  // Don't cache any POST requests
-            "PUT *".to_string(),   // Don't cache any PUT requests
+            "POST *".to_string(),   // Don't cache any POST requests
+            "PUT *".to_string(),    // Don't cache any PUT requests
             "DELETE *".to_string(), // Don't cache any DELETE requests
         ])
+        .caching_strategy(CacheStrategy::None)
         .with_websocket_enabled(true); // Enable WebSocket support (default: true)
 
     // Create proxy - proxy_url is the backend server to proxy requests to
@@ -31,13 +32,13 @@ async fn main() {
     // Example: Trigger cache refresh from another part of your application
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        
+
         // Clear all cache entries
         trigger_clone.trigger();
         println!("All cache cleared!");
-        
+
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-        
+
         // Clear only cache entries matching a pattern (supports wildcards)
         trigger_clone.trigger_by_key_match("GET:/api/*");
         println!("Cache cleared for GET:/api/* pattern!");
@@ -49,7 +50,8 @@ async fn main() {
     println!("Proxy server listening on http://0.0.0.0:3000");
     println!("Caching paths: /api/*, /public/*, GET /admin/stats");
     println!("Excluding: /api/admin/*, POST *, PUT *, DELETE *");
-    println!("Note: Only GET requests will be cached (POST/PUT/DELETE are excluded)");
+    println!("Cache strategy: none (proxy-only mode)");
+    println!("Note: Cache reads and writes are disabled in this example");
     println!("WebSocket support: enabled");
 
     axum::serve(listener, proxy_app).await.unwrap();

@@ -6,8 +6,8 @@ use axum::{
     extract::Extension,
     http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode},
 };
-use std::sync::Arc;
 use hyper_util::rt::TokioIo;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ProxyState {
@@ -22,11 +22,11 @@ impl ProxyState {
 }
 
 /// Check if the request is a WebSocket or other upgrade request
-/// 
+///
 /// WebSocket and other protocol upgrades are detected by checking for:
 /// - `Connection: Upgrade` header (case-insensitive)
 /// - Presence of `Upgrade` header
-/// 
+///
 /// These requests will bypass caching and use direct TCP tunneling instead.
 fn is_upgrade_request(headers: &HeaderMap) -> bool {
     headers
@@ -46,20 +46,28 @@ pub async fn proxy_handler(
     // Check for upgrade requests FIRST (before consuming anything from the request)
     // This is critical for WebSocket to work properly
     let is_upgrade = is_upgrade_request(req.headers());
-    
+
     if is_upgrade {
         let method_str = req.method().as_str();
         let path = req.uri().path();
-        
+
         if state.config.enable_websocket {
-            tracing::debug!("Upgrade request detected for {} {}, establishing direct proxy tunnel", method_str, path);
+            tracing::debug!(
+                "Upgrade request detected for {} {}, establishing direct proxy tunnel",
+                method_str,
+                path
+            );
             return handle_upgrade_request(state, req).await;
         } else {
-            tracing::warn!("Upgrade request detected for {} {} but WebSocket support is disabled", method_str, path);
+            tracing::warn!(
+                "Upgrade request detected for {} {} but WebSocket support is disabled",
+                method_str,
+                path
+            );
             return Err(StatusCode::NOT_IMPLEMENTED);
         }
     }
-    
+
     // Extract request details (only after we know it's not an upgrade request)
     let method = req.method().clone();
     let method_str = method.as_str();
@@ -67,13 +75,17 @@ pub async fn proxy_handler(
     let path = uri.path();
     let query = uri.query().unwrap_or("");
     let headers = req.headers().clone();
-    
+
     // Check if only GET requests are allowed
     if state.config.forward_get_only && method != axum::http::Method::GET {
-        tracing::warn!("Non-GET request {} {} rejected (forward_get_only is enabled)", method_str, path);
+        tracing::warn!(
+            "Non-GET request {} {} rejected (forward_get_only is enabled)",
+            method_str,
+            path
+        );
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
-    
+
     // Check if this path should be cached based on include/exclude patterns
     let should_cache = should_cache_path(
         method_str,
@@ -81,7 +93,7 @@ pub async fn proxy_handler(
         &state.config.include_paths,
         &state.config.exclude_paths,
     );
-    
+
     // Generate cache key using the configured function
     let req_info = crate::RequestInfo {
         method: method_str,
@@ -90,26 +102,45 @@ pub async fn proxy_handler(
         headers: &headers,
     };
     let cache_key = (state.config.cache_key_fn)(&req_info);
+    let cache_reads_enabled = !matches!(state.config.cache_strategy, crate::CacheStrategy::None);
 
     // Try to get 404 cache first (available even if should_cache is false)
-    if state.config.cache_404_capacity > 0 {
+    if cache_reads_enabled && state.config.cache_404_capacity > 0 {
         if let Some(cached) = state.cache.get_404(&cache_key).await {
-            tracing::debug!("404 cache hit for: {} {}", method_str, cache_key);
-            return Ok(build_response_from_cache(cached));
+            if cached_response_is_allowed(&state.config.cache_strategy, &cached) {
+                tracing::debug!("404 cache hit for: {} {}", method_str, cache_key);
+                return Ok(build_response_from_cache(cached));
+            }
         }
     }
 
     // Try to get from cache first (only if caching is enabled for this path)
-    if should_cache {
+    if should_cache && cache_reads_enabled {
         if let Some(cached) = state.cache.get(&cache_key).await {
-            tracing::debug!("Cache hit for: {} {}", method_str, cache_key);
-            return Ok(build_response_from_cache(cached));
+            if cached_response_is_allowed(&state.config.cache_strategy, &cached) {
+                tracing::debug!("Cache hit for: {} {}", method_str, cache_key);
+                return Ok(build_response_from_cache(cached));
+            }
         }
-        tracing::debug!("Cache miss for: {} {}, fetching from backend", method_str, cache_key);
+        tracing::debug!(
+            "Cache miss for: {} {}, fetching from backend",
+            method_str,
+            cache_key
+        );
+    } else if !cache_reads_enabled {
+        tracing::debug!(
+            "{} {} not cacheable (cache strategy: none), proxying directly",
+            method_str,
+            path
+        );
     } else {
-        tracing::debug!("{} {} not cacheable (filtered), proxying directly", method_str, path);
+        tracing::debug!(
+            "{} {} not cacheable (filtered), proxying directly",
+            method_str,
+            path
+        );
     }
-    
+
     // Convert body to bytes to forward it
     let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(bytes) => bytes,
@@ -153,6 +184,13 @@ pub async fn proxy_handler(
         headers: convert_headers_to_map(&response_headers),
         status,
     };
+    let response_content_type = response_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let response_is_cacheable = state
+        .config
+        .cache_strategy
+        .allows_content_type(response_content_type);
 
     // Determine if this should be cached as a 404 (either by status or by meta tag if enabled)
     let mut is_404 = status == 404;
@@ -173,14 +211,14 @@ pub async fn proxy_handler(
         }
     }
 
-    if is_404 && state.config.cache_404_capacity > 0 {
+    if is_404 && state.config.cache_404_capacity > 0 && response_is_cacheable {
         // store in 404 cache
         state
             .cache
             .set_404(cache_key.clone(), cached_response.clone())
             .await;
         tracing::debug!("Cached 404 response for: {} {}", method_str, cache_key);
-    } else if should_cache {
+    } else if should_cache && response_is_cacheable {
         state
             .cache
             .set(cache_key.clone(), cached_response.clone())
@@ -192,13 +230,13 @@ pub async fn proxy_handler(
 }
 
 /// Handle WebSocket and other upgrade requests by establishing a direct TCP tunnel
-/// 
+///
 /// This function handles long-lived connections like WebSocket by:
 /// 1. Connecting to the backend server
 /// 2. Forwarding the upgrade request
 /// 3. Capturing both client and backend upgrade connections
 /// 4. Creating a bidirectional TCP tunnel between them
-/// 
+///
 /// The tunnel remains open for the lifetime of the connection, allowing
 /// full-duplex communication. Data flows directly between client and backend
 /// without any caching or inspection.
@@ -207,18 +245,18 @@ async fn handle_upgrade_request(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
     let target_url = format!("{}{}", state.config.proxy_url, req.uri());
-    
+
     // Parse the backend URL to extract host and port
     let backend_uri = target_url.parse::<hyper::Uri>().map_err(|e| {
         tracing::error!("Failed to parse backend URL: {}", e);
         StatusCode::BAD_GATEWAY
     })?;
-    
+
     let host = backend_uri.host().ok_or_else(|| {
         tracing::error!("No host in backend URL");
         StatusCode::BAD_GATEWAY
     })?;
-    
+
     let port = backend_uri.port_u16().unwrap_or_else(|| {
         if backend_uri.scheme_str() == Some("https") {
             443
@@ -226,11 +264,11 @@ async fn handle_upgrade_request(
             80
         }
     });
-    
+
     // IMPORTANT: Set up client upgrade BEFORE processing the request
     // This captures the client's connection for later upgrade
     let client_upgrade = hyper::upgrade::on(&mut req);
-    
+
     // Connect to backend
     let backend_stream = tokio::net::TcpStream::connect((host, port))
         .await
@@ -238,9 +276,9 @@ async fn handle_upgrade_request(
             tracing::error!("Failed to connect to backend {}:{}: {}", host, port, e);
             StatusCode::BAD_GATEWAY
         })?;
-    
+
     let backend_io = TokioIo::new(backend_stream);
-    
+
     // Build the backend request with upgrade support
     let (mut sender, conn) = hyper::client::conn::http1::handshake(backend_io)
         .await
@@ -248,7 +286,7 @@ async fn handle_upgrade_request(
             tracing::error!("Failed to handshake with backend: {}", e);
             StatusCode::BAD_GATEWAY
         })?;
-    
+
     // Spawn a task to poll the connection - this will handle the upgrade
     let conn_task = tokio::spawn(async move {
         match conn.with_upgrades().await {
@@ -262,13 +300,13 @@ async fn handle_upgrade_request(
             }
         }
     });
-    
+
     // Forward the request to the backend
     let backend_response = sender.send_request(req).await.map_err(|e| {
         tracing::error!("Failed to send request to backend: {}", e);
         StatusCode::BAD_GATEWAY
     })?;
-    
+
     // Check if backend accepted the upgrade
     let status = backend_response.status();
     if status != StatusCode::SWITCHING_PROTOCOLS {
@@ -278,34 +316,31 @@ async fn handle_upgrade_request(
         let body = Body::new(body);
         return Ok(Response::from_parts(parts, body));
     }
-    
+
     // Extract headers before moving backend_response
     let backend_headers = backend_response.headers().clone();
-    
+
     // Get the upgraded backend connection
     let backend_upgrade = hyper::upgrade::on(backend_response);
-    
+
     // Spawn a task to handle bidirectional streaming between client and backend
     tokio::spawn(async move {
         tracing::debug!("Starting upgrade tunnel establishment");
-        
+
         // Wait for both upgrades to complete
-        let (client_result, backend_result) = tokio::join!(
-            client_upgrade,
-            backend_upgrade
-        );
-        
+        let (client_result, backend_result) = tokio::join!(client_upgrade, backend_upgrade);
+
         // Drop the connection task as we now have the upgraded streams
         drop(conn_task);
-        
+
         match (client_result, backend_result) {
             (Ok(client_upgraded), Ok(backend_upgraded)) => {
                 tracing::debug!("Both upgrades successful, establishing bidirectional tunnel");
-                
+
                 // Wrap both in TokioIo for AsyncRead + AsyncWrite
                 let mut client_stream = TokioIo::new(client_upgraded);
                 let mut backend_stream = TokioIo::new(backend_upgraded);
-                
+
                 // Create bidirectional tunnel
                 match tokio::io::copy_bidirectional(&mut client_stream, &mut backend_stream).await {
                     Ok((client_to_backend, backend_to_client)) => {
@@ -328,26 +363,24 @@ async fn handle_upgrade_request(
             }
         }
     });
-    
+
     // Build the response to send back to the client with upgrade support
     let mut response = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .body(Body::empty())
         .unwrap();
-    
+
     // Copy necessary headers from backend response
     // These headers are essential for WebSocket handshake
     if let Some(upgrade_header) = backend_headers.get(axum::http::header::UPGRADE) {
-        response.headers_mut().insert(
-            axum::http::header::UPGRADE,
-            upgrade_header.clone(),
-        );
+        response
+            .headers_mut()
+            .insert(axum::http::header::UPGRADE, upgrade_header.clone());
     }
     if let Some(connection_header) = backend_headers.get(axum::http::header::CONNECTION) {
-        response.headers_mut().insert(
-            axum::http::header::CONNECTION,
-            connection_header.clone(),
-        );
+        response
+            .headers_mut()
+            .insert(axum::http::header::CONNECTION, connection_header.clone());
     }
     if let Some(sec_websocket_accept) = backend_headers.get("sec-websocket-accept") {
         response.headers_mut().insert(
@@ -355,9 +388,9 @@ async fn handle_upgrade_request(
             sec_websocket_accept.clone(),
         );
     }
-    
+
     tracing::debug!("Upgrade response sent to client, tunnel task spawned");
-    
+
     Ok(response)
 }
 
@@ -371,7 +404,11 @@ fn build_response_from_cache(cached: CachedResponse) -> Response<Body> {
             if let Ok(header_value) = HeaderValue::from_str(&value) {
                 headers.insert(header_name, header_value);
             } else {
-                tracing::warn!("Failed to parse header value for key '{}': {:?}", key, value);
+                tracing::warn!(
+                    "Failed to parse header value for key '{}': {:?}",
+                    key,
+                    value
+                );
             }
         } else {
             tracing::warn!("Failed to parse header name: {}", key);
@@ -379,6 +416,15 @@ fn build_response_from_cache(cached: CachedResponse) -> Response<Body> {
     }
 
     response.body(Body::from(cached.body)).unwrap()
+}
+
+fn cached_response_is_allowed(strategy: &crate::CacheStrategy, cached: &CachedResponse) -> bool {
+    strategy.allows_content_type(
+        cached
+            .headers
+            .get("content-type")
+            .map(|value| value.as_str()),
+    )
 }
 
 fn convert_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {

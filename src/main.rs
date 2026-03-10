@@ -26,8 +26,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Proxy URL: {}", config.server.proxy_url);
     tracing::info!("Include paths: {:?}", config.server.include_paths);
     tracing::info!("Exclude paths: {:?}", config.server.exclude_paths);
-    tracing::info!("WebSocket support: {}", if config.server.enable_websocket { "enabled" } else { "disabled" });
-    tracing::info!("Forward GET only: {}", if config.server.forward_get_only { "enabled" } else { "disabled" });
+    tracing::info!("Cache strategy: {}", config.server.cache_strategy);
+    tracing::info!(
+        "WebSocket support: {}",
+        if config.server.enable_websocket {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    tracing::info!(
+        "Forward GET only: {}",
+        if config.server.forward_get_only {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     // Create proxy configuration
     let proxy_config = CreateProxyConfig::new(config.server.proxy_url.clone())
@@ -37,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
         .with_forward_get_only(config.server.forward_get_only);
     let proxy_config = proxy_config
         .with_cache_404_capacity(config.server.cache_404_capacity)
-        .with_use_404_meta(config.server.use_404_meta);
+        .with_use_404_meta(config.server.use_404_meta)
+        .with_cache_strategy(config.server.cache_strategy.clone());
 
     // Create proxy server with the config
     let (proxy_app, refresh_trigger) = phantom_frame::create_proxy(proxy_config);

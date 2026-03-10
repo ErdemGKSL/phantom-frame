@@ -34,7 +34,9 @@ impl RefreshTrigger {
     /// Supports wildcards: "/api/*", "GET:/api/*", etc.
     pub fn trigger_by_key_match(&self, pattern: &str) {
         // Ignore errors if there are no receivers
-        let _ = self.sender.send(RefreshMessage::Pattern(pattern.to_string()));
+        let _ = self
+            .sender
+            .send(RefreshMessage::Pattern(pattern.to_string()));
     }
 
     /// Subscribe to refresh events
@@ -52,14 +54,14 @@ fn matches_pattern(key: &str, pattern: &str) -> bool {
 
     // Split pattern by '*' and check if all parts exist in order
     let parts: Vec<&str> = pattern.split('*').collect();
-    
+
     if parts.len() == 1 {
         // No wildcard, exact match already checked above
         return false;
     }
 
     let mut current_pos = 0;
-    
+
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() {
             continue;
@@ -252,19 +254,37 @@ mod tests {
         // capacity 2 for quicker eviction
         let store = CacheStore::new(trigger, 2);
 
-        let resp1 = CachedResponse { body: vec![1], headers: HashMap::new(), status: 404 };
-        let resp2 = CachedResponse { body: vec![2], headers: HashMap::new(), status: 404 };
-        let resp3 = CachedResponse { body: vec![3], headers: HashMap::new(), status: 404 };
+        let resp1 = CachedResponse {
+            body: vec![1],
+            headers: HashMap::new(),
+            status: 404,
+        };
+        let resp2 = CachedResponse {
+            body: vec![2],
+            headers: HashMap::new(),
+            status: 404,
+        };
+        let resp3 = CachedResponse {
+            body: vec![3],
+            headers: HashMap::new(),
+            status: 404,
+        };
 
         // Set two 404 entries
-        store.set_404("GET:/notfound1".to_string(), resp1.clone()).await;
-        store.set_404("GET:/notfound2".to_string(), resp2.clone()).await;
+        store
+            .set_404("GET:/notfound1".to_string(), resp1.clone())
+            .await;
+        store
+            .set_404("GET:/notfound2".to_string(), resp2.clone())
+            .await;
 
         assert_eq!(store.size_404().await, 2);
         assert_eq!(store.get_404("GET:/notfound1").await.unwrap().body, vec![1]);
 
         // Add third entry - should evict oldest (notfound1)
-        store.set_404("GET:/notfound3".to_string(), resp3.clone()).await;
+        store
+            .set_404("GET:/notfound3".to_string(), resp3.clone())
+            .await;
         assert_eq!(store.size_404().await, 2);
         assert!(store.get_404("GET:/notfound1").await.is_none());
         assert_eq!(store.get_404("GET:/notfound2").await.unwrap().body, vec![2]);
@@ -276,9 +296,17 @@ mod tests {
         let trigger = RefreshTrigger::new();
         let store = CacheStore::new(trigger, 10);
 
-        let resp = CachedResponse { body: vec![1], headers: HashMap::new(), status: 404 };
-        store.set_404("GET:/api/notfound".to_string(), resp.clone()).await;
-        store.set_404("GET:/api/another".to_string(), resp.clone()).await;
+        let resp = CachedResponse {
+            body: vec![1],
+            headers: HashMap::new(),
+            status: 404,
+        };
+        store
+            .set_404("GET:/api/notfound".to_string(), resp.clone())
+            .await;
+        store
+            .set_404("GET:/api/another".to_string(), resp.clone())
+            .await;
         assert_eq!(store.size_404().await, 2);
 
         store.clear_by_pattern("GET:/api/*").await;

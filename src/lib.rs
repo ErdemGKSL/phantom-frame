@@ -7,7 +7,78 @@ pub mod proxy;
 use axum::{extract::Extension, Router};
 use cache::{CacheStore, RefreshTrigger};
 use proxy::ProxyState;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Controls which backend responses are eligible for caching.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStrategy {
+    /// Cache every response that passes the existing path and method filters.
+    #[default]
+    All,
+    /// Disable caching entirely, including 404 cache entries.
+    None,
+    /// Cache HTML documents only.
+    OnlyHtml,
+    /// Cache everything except image responses.
+    NoImages,
+    /// Cache image responses only.
+    OnlyImages,
+    /// Cache non-HTML static/application assets.
+    OnlyAssets,
+}
+
+impl CacheStrategy {
+    /// Check whether a response with the given content type can be cached.
+    pub fn allows_content_type(&self, content_type: Option<&str>) -> bool {
+        let content_type = content_type
+            .and_then(|value| value.split(';').next())
+            .map(|value| value.trim().to_ascii_lowercase());
+
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::OnlyHtml => content_type
+                .as_deref()
+                .is_some_and(|value| value == "text/html" || value == "application/xhtml+xml"),
+            Self::NoImages => !content_type
+                .as_deref()
+                .is_some_and(|value| value.starts_with("image/")),
+            Self::OnlyImages => content_type
+                .as_deref()
+                .is_some_and(|value| value.starts_with("image/")),
+            Self::OnlyAssets => content_type.as_deref().is_some_and(|value| {
+                value.starts_with("image/")
+                    || value.starts_with("font/")
+                    || value == "text/css"
+                    || value == "text/javascript"
+                    || value == "application/javascript"
+                    || value == "application/x-javascript"
+                    || value == "application/json"
+                    || value == "application/manifest+json"
+                    || value == "application/wasm"
+                    || value == "application/xml"
+                    || value == "text/xml"
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for CacheStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::All => "all",
+            Self::None => "none",
+            Self::OnlyHtml => "only_html",
+            Self::NoImages => "no_images",
+            Self::OnlyImages => "only_images",
+            Self::OnlyAssets => "only_assets",
+        };
+
+        f.write_str(value)
+    }
+}
 
 /// Information about an incoming request for cache key generation
 #[derive(Clone, Debug)]
@@ -27,26 +98,26 @@ pub struct RequestInfo<'a> {
 pub struct CreateProxyConfig {
     /// The backend URL to proxy requests to
     pub proxy_url: String,
-    
+
     /// Paths to include in caching (empty means include all)
     /// Supports wildcards and method prefixes: "/api/*", "POST /api/*", "GET /*/users", etc.
     pub include_paths: Vec<String>,
-    
+
     /// Paths to exclude from caching (empty means exclude none)
     /// Supports wildcards and method prefixes: "/admin/*", "POST *", "PUT /api/*", etc.
     /// Exclude overrides include
     pub exclude_paths: Vec<String>,
-    
+
     /// Enable WebSocket and protocol upgrade support (default: true)
     /// When enabled, requests with Connection: Upgrade headers will bypass
     /// the cache and establish a direct bidirectional TCP tunnel
     pub enable_websocket: bool,
-    
+
     /// Only allow GET requests, reject all others (default: false)
     /// When true, only GET requests are processed; POST, PUT, DELETE, etc. return 405 Method Not Allowed
     /// Useful for static site prerendering where mutations shouldn't be allowed
     pub forward_get_only: bool,
-    
+
     /// Custom cache key generator
     /// Takes request info and returns a cache key
     /// Default: method + path + query string
@@ -57,6 +128,9 @@ pub struct CreateProxyConfig {
     /// When true, treat a response containing the meta tag `<meta name="phantom-404" content="true">` as a 404
     /// This is an optional performance-affecting fallback to detect framework-generated 404 pages.
     pub use_404_meta: bool,
+
+    /// Controls which responses should be cached after the backend responds.
+    pub cache_strategy: CacheStrategy,
 }
 
 impl CreateProxyConfig {
@@ -77,33 +151,34 @@ impl CreateProxyConfig {
             }),
             cache_404_capacity: 100,
             use_404_meta: false,
+            cache_strategy: CacheStrategy::All,
         }
     }
-    
+
     /// Set include paths
     pub fn with_include_paths(mut self, paths: Vec<String>) -> Self {
         self.include_paths = paths;
         self
     }
-    
+
     /// Set exclude paths
     pub fn with_exclude_paths(mut self, paths: Vec<String>) -> Self {
         self.exclude_paths = paths;
         self
     }
-    
+
     /// Enable or disable WebSocket and protocol upgrade support
     pub fn with_websocket_enabled(mut self, enabled: bool) -> Self {
         self.enable_websocket = enabled;
         self
     }
-    
+
     /// Only allow GET requests, reject all others
     pub fn with_forward_get_only(mut self, enabled: bool) -> Self {
         self.forward_get_only = enabled;
         self
     }
-    
+
     /// Set custom cache key function
     pub fn with_cache_key_fn<F>(mut self, f: F) -> Self
     where
@@ -123,6 +198,17 @@ impl CreateProxyConfig {
     pub fn with_use_404_meta(mut self, enabled: bool) -> Self {
         self.use_404_meta = enabled;
         self
+    }
+
+    /// Set the cache strategy used to decide which response types are stored.
+    pub fn with_cache_strategy(mut self, strategy: CacheStrategy) -> Self {
+        self.cache_strategy = strategy;
+        self
+    }
+
+    /// Alias for callers that prefer a more fluent builder name.
+    pub fn caching_strategy(self, strategy: CacheStrategy) -> Self {
+        self.with_cache_strategy(strategy)
     }
 }
 
@@ -145,9 +231,12 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
 }
 
 /// Create a proxy handler with an existing refresh trigger
-pub fn create_proxy_with_trigger(config: CreateProxyConfig, refresh_trigger: RefreshTrigger) -> Router {
-    let cache = CacheStore::new(refresh_trigger, 100);
-    
+pub fn create_proxy_with_trigger(
+    config: CreateProxyConfig,
+    refresh_trigger: RefreshTrigger,
+) -> Router {
+    let cache = CacheStore::new(refresh_trigger, config.cache_404_capacity);
+
     // Spawn background task to listen for refresh events
     spawn_refresh_listener(cache.clone());
 
@@ -161,7 +250,7 @@ pub fn create_proxy_with_trigger(config: CreateProxyConfig, refresh_trigger: Ref
 /// Spawn a background task to listen for refresh events
 fn spawn_refresh_listener(cache: CacheStore) {
     let mut receiver = cache.refresh_trigger().subscribe();
-    
+
     tokio::spawn(async move {
         loop {
             match receiver.recv().await {
@@ -170,7 +259,10 @@ fn spawn_refresh_listener(cache: CacheStore) {
                     cache.clear().await;
                 }
                 Ok(cache::RefreshMessage::Pattern(pattern)) => {
-                    tracing::debug!("Cache refresh triggered: clearing entries matching pattern '{}'", pattern);
+                    tracing::debug!(
+                        "Cache refresh triggered: clearing entries matching pattern '{}'",
+                        pattern
+                    );
                     cache.clear_by_pattern(&pattern).await;
                 }
                 Err(e) => {
@@ -185,6 +277,22 @@ fn spawn_refresh_listener(cache: CacheStore) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cache_strategy_content_types() {
+        assert!(CacheStrategy::All.allows_content_type(None));
+        assert!(!CacheStrategy::None.allows_content_type(Some("text/html")));
+        assert!(CacheStrategy::OnlyHtml.allows_content_type(Some("text/html; charset=utf-8")));
+        assert!(!CacheStrategy::OnlyHtml.allows_content_type(Some("image/png")));
+        assert!(CacheStrategy::NoImages.allows_content_type(Some("text/css")));
+        assert!(!CacheStrategy::NoImages.allows_content_type(Some("image/webp")));
+        assert!(CacheStrategy::OnlyImages.allows_content_type(Some("image/svg+xml")));
+        assert!(!CacheStrategy::OnlyImages.allows_content_type(Some("application/javascript")));
+        assert!(CacheStrategy::OnlyAssets.allows_content_type(Some("application/javascript")));
+        assert!(CacheStrategy::OnlyAssets.allows_content_type(Some("image/png")));
+        assert!(!CacheStrategy::OnlyAssets.allows_content_type(Some("text/html")));
+        assert!(!CacheStrategy::OnlyAssets.allows_content_type(None));
+    }
 
     #[tokio::test]
     async fn test_create_proxy() {
