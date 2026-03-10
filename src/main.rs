@@ -27,6 +27,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Include paths: {:?}", config.server.include_paths);
     tracing::info!("Exclude paths: {:?}", config.server.exclude_paths);
     tracing::info!("Cache strategy: {}", config.server.cache_strategy);
+    tracing::info!("Compress strategy: {}", config.server.compress_strategy);
+    tracing::info!("Cache storage mode: {}", config.server.cache_storage_mode);
+    if let Some(cache_directory) = &config.server.cache_directory {
+        tracing::info!("Cache directory override: {}", cache_directory.display());
+    }
     tracing::info!(
         "WebSocket support: {}",
         if config.server.enable_websocket {
@@ -53,7 +58,14 @@ async fn main() -> anyhow::Result<()> {
     let proxy_config = proxy_config
         .with_cache_404_capacity(config.server.cache_404_capacity)
         .with_use_404_meta(config.server.use_404_meta)
-        .with_cache_strategy(config.server.cache_strategy.clone());
+        .with_cache_strategy(config.server.cache_strategy.clone())
+        .with_compress_strategy(config.server.compress_strategy.clone())
+        .with_cache_storage_mode(config.server.cache_storage_mode.clone());
+    let proxy_config = if let Some(cache_directory) = config.server.cache_directory.clone() {
+        proxy_config.with_cache_directory(cache_directory)
+    } else {
+        proxy_config
+    };
 
     // Create proxy server with the config
     let (proxy_app, refresh_trigger) = phantom_frame::create_proxy(proxy_config);

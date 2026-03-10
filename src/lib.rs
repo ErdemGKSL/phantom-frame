@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod compression;
 pub mod config;
 pub mod control;
 pub mod path_matcher;
@@ -8,6 +9,7 @@ use axum::{extract::Extension, Router};
 use cache::{CacheStore, RefreshTrigger};
 use proxy::ProxyState;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Controls which backend responses are eligible for caching.
@@ -80,6 +82,56 @@ impl std::fmt::Display for CacheStrategy {
     }
 }
 
+/// Controls how cacheable responses are stored in memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressStrategy {
+    /// Store cache entries without additional compression.
+    None,
+    /// Store cache entries with Brotli compression.
+    #[default]
+    Brotli,
+    /// Store cache entries with gzip compression.
+    Gzip,
+    /// Store cache entries with deflate compression.
+    Deflate,
+}
+
+impl std::fmt::Display for CompressStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::None => "none",
+            Self::Brotli => "brotli",
+            Self::Gzip => "gzip",
+            Self::Deflate => "deflate",
+        };
+
+        f.write_str(value)
+    }
+}
+
+/// Controls where cached response bodies are stored.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStorageMode {
+    /// Keep cached bodies in process memory.
+    #[default]
+    Memory,
+    /// Persist cached bodies to the filesystem and load them on cache hits.
+    Filesystem,
+}
+
+impl std::fmt::Display for CacheStorageMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Memory => "memory",
+            Self::Filesystem => "filesystem",
+        };
+
+        f.write_str(value)
+    }
+}
+
 /// Information about an incoming request for cache key generation
 #[derive(Clone, Debug)]
 pub struct RequestInfo<'a> {
@@ -131,6 +183,15 @@ pub struct CreateProxyConfig {
 
     /// Controls which responses should be cached after the backend responds.
     pub cache_strategy: CacheStrategy,
+
+    /// Controls how cached bodies are stored in memory.
+    pub compress_strategy: CompressStrategy,
+
+    /// Controls where cached response bodies are stored.
+    pub cache_storage_mode: CacheStorageMode,
+
+    /// Optional override for filesystem-backed cache bodies.
+    pub cache_directory: Option<PathBuf>,
 }
 
 impl CreateProxyConfig {
@@ -152,6 +213,9 @@ impl CreateProxyConfig {
             cache_404_capacity: 100,
             use_404_meta: false,
             cache_strategy: CacheStrategy::All,
+            compress_strategy: CompressStrategy::Brotli,
+            cache_storage_mode: CacheStorageMode::Memory,
+            cache_directory: None,
         }
     }
 
@@ -210,13 +274,41 @@ impl CreateProxyConfig {
     pub fn caching_strategy(self, strategy: CacheStrategy) -> Self {
         self.with_cache_strategy(strategy)
     }
+
+    /// Set the compression strategy used for stored cache entries.
+    pub fn with_compress_strategy(mut self, strategy: CompressStrategy) -> Self {
+        self.compress_strategy = strategy;
+        self
+    }
+
+    /// Alias for callers that prefer a more fluent builder name.
+    pub fn compression_strategy(self, strategy: CompressStrategy) -> Self {
+        self.with_compress_strategy(strategy)
+    }
+
+    /// Set the backing store for cached response bodies.
+    pub fn with_cache_storage_mode(mut self, mode: CacheStorageMode) -> Self {
+        self.cache_storage_mode = mode;
+        self
+    }
+
+    /// Set the filesystem directory used for disk-backed cache bodies.
+    pub fn with_cache_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.cache_directory = Some(directory.into());
+        self
+    }
 }
 
 /// The main library interface for using phantom-frame as a library
 /// Returns a proxy handler function and a refresh trigger
 pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
     let refresh_trigger = RefreshTrigger::new();
-    let cache = CacheStore::new(refresh_trigger.clone(), config.cache_404_capacity);
+    let cache = CacheStore::with_storage(
+        refresh_trigger.clone(),
+        config.cache_404_capacity,
+        config.cache_storage_mode.clone(),
+        config.cache_directory.clone(),
+    );
 
     // Spawn background task to listen for refresh events
     spawn_refresh_listener(cache.clone());
@@ -235,7 +327,12 @@ pub fn create_proxy_with_trigger(
     config: CreateProxyConfig,
     refresh_trigger: RefreshTrigger,
 ) -> Router {
-    let cache = CacheStore::new(refresh_trigger, config.cache_404_capacity);
+    let cache = CacheStore::with_storage(
+        refresh_trigger,
+        config.cache_404_capacity,
+        config.cache_storage_mode.clone(),
+        config.cache_directory.clone(),
+    );
 
     // Spawn background task to listen for refresh events
     spawn_refresh_listener(cache.clone());
@@ -294,9 +391,18 @@ mod tests {
         assert!(!CacheStrategy::OnlyAssets.allows_content_type(None));
     }
 
+    #[test]
+    fn test_compress_strategy_display() {
+        assert_eq!(CompressStrategy::default().to_string(), "brotli");
+        assert_eq!(CompressStrategy::None.to_string(), "none");
+        assert_eq!(CompressStrategy::Gzip.to_string(), "gzip");
+        assert_eq!(CompressStrategy::Deflate.to_string(), "deflate");
+    }
+
     #[tokio::test]
     async fn test_create_proxy() {
         let config = CreateProxyConfig::new("http://localhost:8080".to_string());
+        assert_eq!(config.compress_strategy, CompressStrategy::Brotli);
         let (_app, trigger) = create_proxy(config);
         trigger.trigger();
         trigger.trigger_by_key_match("GET:/api/*");

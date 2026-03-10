@@ -10,6 +10,7 @@ A high-performance prerendering proxy engine written in Rust. Cache and serve pr
 
 - 🚀 **Fast caching proxy** - Cache prerendered content and serve it instantly
 - 🎛️ **Flexible cache strategies** - Disable caching entirely or target HTML, images, and assets only
+- 🗜️ **Cache-aware compression** - Store cached bodies as Brotli, gzip, or deflate and fall back to identity when a client does not support the stored encoding
 - 🔧 **Dual mode operation** - Run as standalone HTTP server or integrate as a library
 - 🔄 **Dynamic cache refresh** - Trigger cache invalidation via control endpoint or programmatically
 - 🔐 **Optional authentication** - Secure control endpoints with bearer token auth
@@ -68,6 +69,21 @@ forward_get_only = false
 # Use "none" when you want phantom-frame to behave like a plain proxy in development.
 cache_strategy = "all"
 
+# Optional: Control how cached responses are stored in memory (default: "brotli")
+# Available values: "none", "brotli", "gzip", "deflate"
+# Only responses that are actually written to cache are compressed.
+# If a later client does not support the stored encoding, phantom-frame decodes
+# the cached body and serves it without Content-Encoding.
+compress_strategy = "brotli"
+
+# Optional: Control where cached response bodies are stored (default: "memory")
+# Available values: "memory", "filesystem"
+# Filesystem mode stores cache bodies under the OS temp directory unless cache_directory is set.
+cache_storage_mode = "memory"
+
+# Optional: Override the directory used for filesystem-backed cache bodies
+# cache_directory = "./.phantom-frame-cache"
+
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <token>
 control_auth = "your-secret-token-here"
@@ -95,6 +111,59 @@ cache_strategy = "only_html"
 
 # Cache scripts, styles, fonts, JSON, and images but skip HTML documents
 cache_strategy = "only_assets"
+```
+
+#### Cache Compression Strategies
+
+Use `compress_strategy` to control how cached bodies are stored in memory:
+
+- `none`: Keep cached bodies uncompressed.
+- `brotli`: Store cached bodies with Brotli compression.
+- `gzip`: Store cached bodies with gzip compression.
+- `deflate`: Store cached bodies with deflate compression.
+
+Behavior notes:
+
+- Compression is applied only when phantom-frame is going to store the response in cache.
+- Non-cacheable responses are proxied directly with the backend body and headers unchanged.
+- Cached entries are stored once per cache key, not once per encoding.
+- If the browser supports the stored encoding, phantom-frame serves the cached compressed bytes directly.
+- If the browser does not support the stored encoding, phantom-frame decodes the cached body and serves identity instead of creating another cache entry.
+
+Examples:
+
+```toml
+# Keep cached responses uncompressed
+compress_strategy = "none"
+
+# Store cached responses as gzip instead of Brotli
+compress_strategy = "gzip"
+```
+
+#### Cache Body Storage Modes
+
+Use `cache_storage_mode` to control whether cached bodies stay in RAM or move to the filesystem after compression:
+
+- `memory`: Preserve the previous behavior and keep cached bodies in process memory.
+- `filesystem`: Write cached bodies to a phantom-frame temp directory and load them back from disk on cache hits.
+
+Behavior notes:
+
+- Metadata such as status code, headers, and cache keys still stays in memory.
+- `compress_strategy` still applies before the body is stored, so cache-hit content negotiation behaves the same in either mode.
+- `cache_directory` is optional. If omitted, phantom-frame uses a subdirectory under the OS temp directory.
+- On startup, phantom-frame removes orphaned cache files left in its filesystem cache subdirectories from previous process exits.
+- Clearing the cache, wildcard invalidation, and 404 eviction also delete the backing files.
+
+Examples:
+
+```toml
+# Reduce RAM usage by writing cached bodies to the temp directory
+cache_storage_mode = "filesystem"
+
+# Use a project-local directory for cache files instead of the OS temp directory
+cache_storage_mode = "filesystem"
+cache_directory = "./.phantom-frame-cache"
 ```
 
 #### Path Filtering
@@ -151,7 +220,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phantom-frame = { version = "0.1.14" }
+phantom-frame = { version = "0.1.15" }
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8.6"
 ```
@@ -163,6 +232,7 @@ use phantom_frame::{
     create_proxy,
     cache::RefreshTrigger,
     CacheStrategy,
+    CompressStrategy,
     CreateProxyConfig,
 };
 use axum::Router;
@@ -183,6 +253,7 @@ async fn main() {
             "DELETE *".to_string(), // Don't cache any DELETE requests
         ])
         .caching_strategy(CacheStrategy::OnlyHtml)
+        .compression_strategy(CompressStrategy::Brotli)
         .with_websocket_enabled(true); // Enable WebSocket support (default: true)
     
     // Create proxy - returns router and refresh trigger
@@ -214,10 +285,11 @@ async fn main() {
 For dev mode or plain proxying without any cache reads/writes:
 
 ```rust
-use phantom_frame::{CacheStrategy, CreateProxyConfig};
+use phantom_frame::{CacheStrategy, CompressStrategy, CreateProxyConfig};
 
 let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
-    .caching_strategy(CacheStrategy::None);
+    .caching_strategy(CacheStrategy::None)
+    .compression_strategy(CompressStrategy::None);
 ```
 
 #### Custom Cache Key Function

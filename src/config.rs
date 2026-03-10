@@ -1,7 +1,7 @@
-use crate::CacheStrategy;
+use crate::{CacheStorageMode, CacheStrategy, CompressStrategy};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -58,6 +58,18 @@ pub struct ServerConfig {
     /// Controls which response types should be cached.
     #[serde(default)]
     pub cache_strategy: CacheStrategy,
+
+    /// Controls how cached responses are stored in memory.
+    #[serde(default)]
+    pub compress_strategy: CompressStrategy,
+
+    /// Controls where cached response bodies are stored.
+    #[serde(default)]
+    pub cache_storage_mode: CacheStorageMode,
+
+    /// Optional directory override for filesystem-backed cache bodies.
+    #[serde(default)]
+    pub cache_directory: Option<PathBuf>,
 }
 
 fn default_enable_websocket() -> bool {
@@ -110,6 +122,9 @@ impl Default for ServerConfig {
             cache_404_capacity: default_cache_404_capacity(),
             use_404_meta: default_use_404_meta(),
             cache_strategy: CacheStrategy::default(),
+            compress_strategy: CompressStrategy::default(),
+            cache_storage_mode: CacheStorageMode::default(),
+            cache_directory: None,
         }
     }
 }
@@ -123,6 +138,9 @@ mod tests {
         let config: Config =
             toml::from_str("[server]\nproxy_url = \"http://localhost:8080\"\n").unwrap();
         assert_eq!(config.server.cache_strategy, CacheStrategy::All);
+        assert_eq!(config.server.compress_strategy, CompressStrategy::Brotli);
+        assert_eq!(config.server.cache_storage_mode, CacheStorageMode::Memory);
+        assert_eq!(config.server.cache_directory, None);
     }
 
     #[test]
@@ -133,5 +151,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.server.cache_strategy, CacheStrategy::None);
+    }
+
+    #[test]
+    fn test_config_parses_compress_strategy() {
+        let config: Config = toml::from_str(
+            "[server]\nproxy_url = \"http://localhost:8080\"\ncompress_strategy = \"gzip\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.server.compress_strategy, CompressStrategy::Gzip);
+    }
+
+    #[test]
+    fn test_config_parses_cache_storage_mode() {
+        let config: Config = toml::from_str(
+            "[server]\nproxy_url = \"http://localhost:8080\"\ncache_storage_mode = \"filesystem\"\ncache_directory = \"cache-bodies\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.server.cache_storage_mode,
+            CacheStorageMode::Filesystem
+        );
+        assert_eq!(
+            config.server.cache_directory,
+            Some(PathBuf::from("cache-bodies"))
+        );
     }
 }

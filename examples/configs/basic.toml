@@ -35,6 +35,18 @@ enable_websocket = true
 # Available values: "all", "none", "only_html", "no_images", "only_images", "only_assets"
 # cache_strategy = "none"
 
+# Optional: Control how cached responses are stored in memory (default: "brotli")
+# Available values: "none", "brotli", "gzip", "deflate"
+# compress_strategy = "brotli"
+
+# Optional: Control where cached response bodies are stored (default: "memory")
+# Available values: "memory", "filesystem"
+# Filesystem mode stores cache bodies under the OS temp directory unless cache_directory is set.
+# cache_storage_mode = "filesystem"
+
+# Optional: Override the directory used for filesystem-backed cache bodies
+# cache_directory = "./.phantom-frame-cache"
+
 # Optional: Bearer token for control endpoint authentication
 # If set, requests to /refresh-cache must include: Authorization: Bearer <control_auth>
 # control_auth = "your-secret-token-here"

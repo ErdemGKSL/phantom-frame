@@ -1,5 +1,7 @@
 use axum::Router;
-use phantom_frame::{cache::RefreshTrigger, create_proxy, CacheStrategy, CreateProxyConfig};
+use phantom_frame::{
+    cache::RefreshTrigger, create_proxy, CacheStrategy, CompressStrategy, CreateProxyConfig,
+};
 
 #[tokio::main]
 async fn main() {
@@ -21,6 +23,7 @@ async fn main() {
             "DELETE *".to_string(), // Don't cache any DELETE requests
         ])
         .caching_strategy(CacheStrategy::None)
+        .compression_strategy(CompressStrategy::Brotli)
         .with_websocket_enabled(true); // Enable WebSocket support (default: true)
 
     // Create proxy - proxy_url is the backend server to proxy requests to
@@ -51,6 +54,7 @@ async fn main() {
     println!("Caching paths: /api/*, /public/*, GET /admin/stats");
     println!("Excluding: /api/admin/*, POST *, PUT *, DELETE *");
     println!("Cache strategy: none (proxy-only mode)");
+    println!("Compression strategy: brotli (applies only to cached responses)");
     println!("Note: Cache reads and writes are disabled in this example");
     println!("WebSocket support: enabled");
 
