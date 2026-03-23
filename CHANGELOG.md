@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.18
+
+Release date: 2026-03-23
+
+### Added
+
+- `native-tls` and `rustls` Cargo features for selecting the TLS backend used by the upstream HTTP client.
+- `native-tls` is the default, using the platform's native TLS stack (SChannel on Windows, Secure Transport on macOS, OpenSSL on Linux).
+- `rustls` feature (`--no-default-features --features rustls`) compiles in rustls with bundled webpki root certificates instead.
+- Compile-time mutual-exclusivity guard: enabling both features simultaneously produces a clear `compile_error!`.
+
 ## v0.1.17
 
 Release date: 2026-03-10

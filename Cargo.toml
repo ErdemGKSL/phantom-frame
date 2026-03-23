@@ -1,6 +1,6 @@
 [package]
 name = "phantom-frame"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 authors = ["Erdem Göksel <erdem.goksel.dev@gmail.com>"]
 description = "A high-performance prerendering proxy engine with caching support"
@@ -17,7 +17,7 @@ tokio = { version = "1.40", features = ["full"] }
 axum = "0.8.6"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tower = "0.5"
 tower-http = { version = "0.6.6", features = ["trace"] }
 tracing = "0.1"
@@ -29,6 +29,11 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 brotli = "8.0"
 flate2 = "1.1"
+
+[features]
+default = ["native-tls"]
+native-tls = ["reqwest/native-tls"]
+rustls = ["reqwest/rustls-tls"]
 
 [lib]
 name = "phantom_frame"

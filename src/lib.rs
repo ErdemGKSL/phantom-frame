@@ -1,3 +1,6 @@
+#[cfg(all(feature = "native-tls", feature = "rustls"))]
+compile_error!("Features `native-tls` and `rustls` are mutually exclusive — enable only one.");
+
 pub mod cache;
 pub mod compression;
 pub mod config;
