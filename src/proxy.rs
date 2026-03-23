@@ -156,7 +156,14 @@ pub async fn proxy_handler(
     };
 
     // Fetch from backend (proxy_url)
-    let target_url = format!("{}{}", state.config.proxy_url, uri);
+    // Use path+query only — not the full `uri` — because HTTP/2 requests carry an
+    // absolute-form URI (e.g. `https://example.com/path`) which would corrupt the
+    // concatenated URL when appended to proxy_url.
+    let path_and_query = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or_else(|| uri.path());
+    let target_url = format!("{}{}", state.config.proxy_url, path_and_query);
     let client = match reqwest::Client::builder()
         .no_brotli()
         .no_deflate()
@@ -306,7 +313,13 @@ async fn handle_upgrade_request(
     state: Arc<ProxyState>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    let target_url = format!("{}{}", state.config.proxy_url, req.uri());
+    // Use path+query only for the same reason as in proxy_handler (HTTP/2 absolute-form URI).
+    let req_path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or_else(|| req.uri().path());
+    let target_url = format!("{}{}", state.config.proxy_url, req_path_and_query);
 
     // Parse the backend URL to extract host and port
     let backend_uri = target_url.parse::<hyper::Uri>().map_err(|e| {

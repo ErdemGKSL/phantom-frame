@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.19
+
+Release date: 2026-03-23
+
+### Fixed
+
+- Fixed 502 Bad Gateway errors when phantom-frame is served behind HTTPS / HTTP/2. HTTP/2 requests carry an absolute-form URI (e.g. `https://example.com/path`) rather than origin-form (`/path`). The upstream `target_url` was being constructed by appending the full absolute URI to `proxy_url`, producing a malformed URL like `http://localhost:5173https://example.com/path`. The proxy now correctly extracts only the path and query from the incoming request URI before forming the upstream URL. This fix applies to both regular proxied requests and WebSocket upgrade requests.
+
 ## v0.1.18
 
 Release date: 2026-03-23
