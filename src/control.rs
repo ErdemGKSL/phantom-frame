@@ -47,6 +47,41 @@ impl ControlState {
             }
         }
     }
+
+    /// Like `resolve_handles`, but for snapshot operations:
+    /// - When a specific server is named, return it even if it's in Dynamic mode
+    ///   (the operation will then fail with BAD_REQUEST from the handle itself).
+    /// - When broadcasting (no server specified), silently skip Dynamic-mode
+    ///   servers that don't support snapshots.
+    fn resolve_snapshot_handles(
+        &self,
+        server: Option<&str>,
+    ) -> Result<Vec<&CacheHandle>, (StatusCode, String)> {
+        match server {
+            None => Ok(self
+                .handles
+                .iter()
+                .filter(|(_, h)| h.is_snapshot_capable())
+                .map(|(_, h)| h)
+                .collect()),
+            Some(name) => {
+                let matched: Vec<&CacheHandle> = self
+                    .handles
+                    .iter()
+                    .filter(|(n, _)| n == name)
+                    .map(|(_, h)| h)
+                    .collect();
+                if matched.is_empty() {
+                    Err((
+                        StatusCode::NOT_FOUND,
+                        format!("No server named '{}' found", name),
+                    ))
+                } else {
+                    Ok(matched)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -129,7 +164,7 @@ async fn add_snapshot_handler(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     check_auth(&state, &headers).map_err(|s| (s, String::new()))?;
 
-    let handles = state.resolve_handles(body.server.as_deref())?;
+    let handles = state.resolve_snapshot_handles(body.server.as_deref())?;
     for handle in handles {
         handle
             .add_snapshot(&body.path)
@@ -154,7 +189,7 @@ async fn refresh_snapshot_handler(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     check_auth(&state, &headers).map_err(|s| (s, String::new()))?;
 
-    let handles = state.resolve_handles(body.server.as_deref())?;
+    let handles = state.resolve_snapshot_handles(body.server.as_deref())?;
     for handle in handles {
         handle
             .refresh_snapshot(&body.path)
@@ -179,7 +214,7 @@ async fn remove_snapshot_handler(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     check_auth(&state, &headers).map_err(|s| (s, String::new()))?;
 
-    let handles = state.resolve_handles(body.server.as_deref())?;
+    let handles = state.resolve_snapshot_handles(body.server.as_deref())?;
     for handle in handles {
         handle
             .remove_snapshot(&body.path)
@@ -210,7 +245,7 @@ async fn refresh_all_snapshots_handler(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let handles = state.resolve_handles(server_filter.as_deref())?;
+    let handles = state.resolve_snapshot_handles(server_filter.as_deref())?;
     for handle in handles {
         handle
             .refresh_all_snapshots()

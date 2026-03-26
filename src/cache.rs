@@ -80,6 +80,12 @@ impl CacheHandle {
             .send(InvalidationMessage::Pattern(pattern.to_string()));
     }
 
+    /// Returns `true` when this handle is connected to a snapshot worker
+    /// (i.e. the server is in `ProxyMode::PreGenerate`).
+    pub fn is_snapshot_capable(&self) -> bool {
+        self.snapshot_tx.is_some()
+    }
+
     /// Subscribe to invalidation events.
     pub fn subscribe(&self) -> broadcast::Receiver<InvalidationMessage> {
         self.sender.subscribe()

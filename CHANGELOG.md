@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.9
+
+Release date: 2026-03-26
+
+### Fixed
+
+- **Snapshot broadcast no longer errors on Dynamic-mode servers**. When `POST /add_snapshot`, `/refresh_snapshot`, `/remove_snapshot`, or `/refresh_all_snapshots` is called without a `"server"` field, Dynamic-mode servers are now silently skipped. Previously the first Dynamic-mode handle in the list caused a `400 Bad Request`, preventing the snapshot from being added to any PreGenerate server.
+- Added `CacheHandle::is_snapshot_capable()` helper to distinguish PreGenerate handles from Dynamic ones without calling into the worker.
+
 ## v0.2.8
 
 Release date: 2026-03-26
