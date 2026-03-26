@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.6
+
+Release date: 2026-03-26
+
+### Added
+
+- **Webhook support** (`webhooks` per `[server.NAME]`). Each server can now declare one or more webhooks that are called on every request **before** cache reads, ensuring access control is enforced even for cached responses.
+  - **`type = "blocking"`** — phantom-frame POSTs the request metadata to the webhook URL and awaits the response. A `2xx` reply allows the request to proceed; any non-`2xx` reply causes the same status code to be returned to the client immediately (the request is never forwarded to the backend or served from cache). A timeout or network error returns `503 Service Unavailable`.
+  - **`type = "notify"`** — the POST is dispatched as a fire-and-forget background task; the request always proceeds immediately regardless of the webhook outcome.
+  - `url` — the endpoint to POST to.
+  - `timeout_ms` — optional per-webhook timeout in milliseconds (default: `5000`). Only meaningful for `blocking` webhooks.
+  - Multiple webhooks per server are supported via the `[[server.NAME.webhooks]]` TOML array syntax. Blocking webhooks run sequentially; the first denial short-circuits the chain.
+  - Webhook POST body: `{ "method", "path", "query", "headers" }`. The request body is never consumed so latency overhead is minimal.
+- `serde_json` added as a dependency (used for webhook payload serialisation).
+
 ## v0.2.5
 
 Release date: 2026-03-26

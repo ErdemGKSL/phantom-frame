@@ -4,7 +4,7 @@ use crate::compression::{
     decompress_body, identity_acceptable,
 };
 use crate::path_matcher::should_cache_path;
-use crate::{CompressStrategy, CreateProxyConfig, ProxyMode};
+use crate::{CompressStrategy, CreateProxyConfig, ProxyMode, WebhookType};
 use axum::{
     body::Body,
     extract::Extension,
@@ -40,6 +40,60 @@ fn is_upgrade_request(headers: &HeaderMap) -> bool {
         .map(|v| v.to_lowercase().contains("upgrade"))
         .unwrap_or(false)
         || headers.contains_key(axum::http::header::UPGRADE)
+}
+
+/// Build the JSON payload sent to webhook endpoints.
+///
+/// Contains `method`, `path`, `query`, and `headers` (as a flat string-to-string
+/// map). The request body is intentionally excluded so that the caller never has
+/// to consume it before the payload is built.
+fn build_webhook_payload(
+    method: &str,
+    path: &str,
+    query: &str,
+    headers: &HeaderMap,
+) -> serde_json::Value {
+    let headers_map: serde_json::Map<String, serde_json::Value> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_string(), serde_json::Value::String(v.to_string())))
+        })
+        .collect();
+
+    serde_json::json!({
+        "method": method,
+        "path": path,
+        "query": query,
+        "headers": headers_map,
+    })
+}
+
+/// POST `payload` to `url`.
+///
+/// Returns:
+/// - `Ok(StatusCode)` — the HTTP status returned by the webhook server.
+/// - `Err(())` — timeout, connection error, or other transport failure.
+async fn call_webhook(
+    url: &str,
+    payload: &serde_json::Value,
+    timeout_ms: u64,
+) -> Result<StatusCode, ()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|_| ())?;
+
+    let response = client
+        .post(url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|_| ())?;
+
+    StatusCode::from_u16(response.status().as_u16()).map_err(|_| ())
 }
 
 /// Main proxy handler that serves prerendered content from cache
@@ -99,6 +153,61 @@ pub async fn proxy_handler(
             path
         );
         return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    // ── Webhook dispatch ────────────────────────────────────────────────────
+    // Webhooks fire before cache reads so that access control is enforced even
+    // for requests that would otherwise be served from the cache.
+    if !state.config.webhooks.is_empty() {
+        let payload = build_webhook_payload(method_str, path, query, &headers);
+
+        for webhook in &state.config.webhooks {
+            match webhook.webhook_type {
+                WebhookType::Notify => {
+                    // Fire-and-forget: spawn without awaiting.
+                    let url = webhook.url.clone();
+                    let payload_clone = payload.clone();
+                    let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
+                    tokio::spawn(async move {
+                        if let Err(()) = call_webhook(&url, &payload_clone, timeout_ms).await {
+                            tracing::warn!("Notify webhook POST to '{}' failed", url);
+                        }
+                    });
+                }
+                WebhookType::Blocking => {
+                    let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
+                    match call_webhook(&webhook.url, &payload, timeout_ms).await {
+                        Ok(status) if status.is_success() => {
+                            tracing::debug!(
+                                "Blocking webhook '{}' allowed {} {}",
+                                webhook.url,
+                                method_str,
+                                path
+                            );
+                        }
+                        Ok(status) => {
+                            tracing::warn!(
+                                "Blocking webhook '{}' denied {} {} with status {}",
+                                webhook.url,
+                                method_str,
+                                path,
+                                status
+                            );
+                            return Err(status);
+                        }
+                        Err(()) => {
+                            tracing::warn!(
+                                "Blocking webhook '{}' timed out or failed for {} {} — denying request",
+                                webhook.url,
+                                method_str,
+                                path
+                            );
+                            return Err(StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Check if this path should be cached based on include/exclude patterns

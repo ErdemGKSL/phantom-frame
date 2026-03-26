@@ -1,4 +1,4 @@
-use crate::{CacheStorageMode, CacheStrategy, CompressStrategy};
+use crate::{CacheStorageMode, CacheStrategy, CompressStrategy, WebhookConfig};
 use anyhow::{bail, Result};
 use serde::{
     de::{self, Visitor},
@@ -224,6 +224,11 @@ pub struct ServerConfig {
     /// Example: `"./apps/client"`
     #[serde(default)]
     pub execute_dir: Option<String>,
+
+    /// Webhooks called for every request before cache reads.
+    /// Blocking webhooks gate access; notify webhooks are fire-and-forget.
+    #[serde(default)]
+    pub webhooks: Vec<WebhookConfig>,
 }
 
 // ── defaults ────────────────────────────────────────────────────────────────
@@ -368,6 +373,7 @@ impl Default for ServerConfig {
             pre_generate_fallthrough: false,
             execute: None,
             execute_dir: None,
+            webhooks: vec![],
         }
     }
 }

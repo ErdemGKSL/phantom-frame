@@ -136,6 +136,34 @@ impl std::fmt::Display for CacheStorageMode {
     }
 }
 
+/// The type of a webhook — controls whether the webhook gates access or just receives a notification.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookType {
+    /// The webhook call must complete with a 2xx response before the request is forwarded.
+    /// A non-2xx response (or a timeout / network error) causes the request to be denied.
+    Blocking,
+    /// The webhook call is dispatched in the background without blocking the request.
+    #[default]
+    Notify,
+}
+
+/// Configuration for a single webhook attached to a server.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    /// The URL to POST the request metadata to.
+    pub url: String,
+
+    /// Whether this webhook is blocking (gates access) or notify (fire-and-forget).
+    #[serde(rename = "type", default)]
+    pub webhook_type: WebhookType,
+
+    /// Timeout in milliseconds for the webhook call (default: 5000 ms).
+    /// On timeout, a blocking webhook denies the request with 503.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 /// Controls the operating mode of the proxy.
 #[derive(Clone, Debug, Default)]
 pub enum ProxyMode {
@@ -225,6 +253,10 @@ pub struct CreateProxyConfig {
 
     /// Controls the operating mode of the proxy (Dynamic vs PreGenerate/SSG).
     pub proxy_mode: ProxyMode,
+
+    /// Webhooks called for every request before cache reads.
+    /// Blocking webhooks gate access; notify webhooks are fire-and-forget.
+    pub webhooks: Vec<WebhookConfig>,
 }
 
 impl CreateProxyConfig {
@@ -250,6 +282,7 @@ impl CreateProxyConfig {
             cache_storage_mode: CacheStorageMode::Memory,
             cache_directory: None,
             proxy_mode: ProxyMode::Dynamic,
+            webhooks: vec![],
         }
     }
 
@@ -336,6 +369,13 @@ impl CreateProxyConfig {
     /// Use `ProxyMode::PreGenerate { paths, fallthrough }` to enable SSG mode.
     pub fn with_proxy_mode(mut self, mode: ProxyMode) -> Self {
         self.proxy_mode = mode;
+        self
+    }
+
+    /// Set the webhooks for this server.
+    /// Blocking webhooks gate access; notify webhooks are fire-and-forget.
+    pub fn with_webhooks(mut self, webhooks: Vec<WebhookConfig>) -> Self {
+        self.webhooks = webhooks;
         self
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "phantom-frame"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 authors = ["Erdem Göksel <erdem.goksel.dev@gmail.com>"]
 description = "A high-performance prerendering proxy engine with caching support"
@@ -16,6 +16,7 @@ categories = ["web-programming", "caching", "network-programming"]
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8.6"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.9.8"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tower = "0.5"

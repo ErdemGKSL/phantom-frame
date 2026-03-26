@@ -81,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
         };
         proxy_config = proxy_config.with_proxy_mode(proxy_mode);
 
+        proxy_config = proxy_config.with_webhooks(server_cfg.webhooks.clone());
+
         let (router, handle) = phantom_frame::create_proxy(proxy_config);
 
         tracing::info!(

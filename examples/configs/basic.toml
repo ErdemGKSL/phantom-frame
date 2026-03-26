@@ -79,6 +79,32 @@ enable_websocket = true
 # Optional: Override the directory used for filesystem-backed cache bodies
 # cache_directory = "./.phantom-frame-cache"
 
+# ── Webhooks ──────────────────────────────────────────────────────────────────
+#
+# Each [[server.NAME.webhooks]] entry defines one webhook for that server.
+# Webhooks fire on every request, BEFORE cache reads are attempted, so access
+# control is enforced even for cached responses.
+#
+# type = "blocking"  — phantom-frame POSTs request metadata to the URL and waits.
+#                      2xx response → request is allowed to continue.
+#                      Non-2xx response → the webhook's status code is returned to
+#                      the client and the request is not forwarded.
+#                      Timeout or connection error → 503 is returned to the client.
+#
+# type = "notify"    — phantom-frame fires a background POST and does not wait for
+#                      a response. The request always proceeds immediately.
+#
+# The POST body contains: method, path, query, headers (no request body).
+#
+# [[server.default.webhooks]]
+# url = "http://auth-service.internal/check"
+# type = "blocking"
+# timeout_ms = 3000    # optional, default 5000 ms
+#
+# [[server.default.webhooks]]
+# url = "http://logger.internal/log"
+# type = "notify"
+
 # ── Example: multi-server config (SSG frontend + dynamic API backend) ─────────
 #
 # [server.frontend]
