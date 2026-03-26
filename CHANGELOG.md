@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.8
+
+Release date: 2026-03-26
+
+### Added
+
+- **Optional `server` field on all control-plane endpoints**. Snapshot and invalidation requests now accept an optional `"server"` field in the JSON body to target a specific named server. When omitted, the operation is broadcast to all servers (previous behaviour preserved).
+  - `POST /invalidate` — `{ "pattern": "/api/*", "server": "frontend" }`
+  - `POST /add_snapshot` — `{ "path": "/about", "server": "frontend" }`
+  - `POST /refresh_snapshot` — `{ "path": "/about", "server": "frontend" }`
+  - `POST /remove_snapshot` — `{ "path": "/about", "server": "frontend" }`
+  - `POST /refresh_all_snapshots` — `{ "server": "frontend" }`
+  - Returns `404` if the given server name does not exist.
+
+### Changed
+
+- `ControlState` now stores `Vec<(String, CacheHandle)>` (name + handle) instead of `Vec<CacheHandle>`. The `create_control_router` function signature is updated accordingly — this only affects code using phantom-frame as a library that calls `create_control_router` directly.
+
 ## v0.2.7
 
 Release date: 2026-03-26

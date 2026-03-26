@@ -110,10 +110,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Compose top-level router ─────────────────────────────────────────────
     let mut app = Router::new();
     let mut star_router: Option<Router> = None;
-    let mut handles: Vec<CacheHandle> = Vec::new();
+    let mut handles: Vec<(String, CacheHandle)> = Vec::new();
 
-    for (_, bind_to, server_router, handle) in entries {
-        handles.push(handle);
+    for (name, bind_to, server_router, handle) in entries {
+        handles.push((name, handle));
         if bind_to == "*" {
             star_router = Some(server_router);
         } else {
