@@ -9,6 +9,15 @@ control_port = 17809
 # Optional: Bearer token for /refresh-cache authentication
 # If set, callers must include: Authorization: Bearer <token>
 # control_auth = "your-secret-token-here"
+# Values can reference environment variables using the $env:VAR syntax:
+# control_auth = "$env:PF_CONTROL_AUTH"
+
+# Optional: Load a .env file before resolving $env: references.
+# false or absent → disabled (default)
+# true            → load .env from the current working directory (silently ignored if absent)
+# "./path/.env"   → load from the given path (error if file does not exist)
+# dotenv = true
+# dotenv = "./.env.local"
 
 # Optional: HTTPS port — when set, cert_path and key_path are required.
 # https_port = 443
@@ -82,13 +91,28 @@ enable_websocket = true
 # Optional: spawn a command and wait for proxy_url's port to accept connections.
 # phantom-frame polls the port every 500 ms (360 s timeout) before serving.
 # On Windows, commands are run via `cmd /C` so pnpm.cmd / npm.cmd etc. work as-is.
+# On Unix, commands are run via `sh -c`.
+#
+# Simple command:
 # execute = "pnpm run dev"
 # execute_dir = "./apps/client"   # working directory (relative to where phantom-frame runs)
+#
+# Commands support && / || chaining — intermediate segments run to completion,
+# the final segment becomes the long-running server process:
+# execute = "pnpm install && pnpm run build && pnpm run start"
+# execute = "pnpm run build || echo 'build failed' && pnpm run start"
+#
+# cd changes the working directory for subsequent segments in the chain:
+# execute = "cd ./apps/client && pnpm install && pnpm run dev"
+#
+# Linux-style KEY=VALUE inline env prefixes are supported on all platforms:
+# execute = "PORT=5173 NODE_ENV=production pnpm run start"
+# execute = "cd ./apps/client && PORT=5173 pnpm run dev"
 #
 # [server.api]
 # bind_to = "/api"
 # proxy_url = "http://localhost:8080"
 # proxy_mode = "dynamic"
 # enable_websocket = true
-# execute = "cargo run --release"
+# execute = "cargo build --release && cargo run --release"
 # execute_dir = "./apps/server"

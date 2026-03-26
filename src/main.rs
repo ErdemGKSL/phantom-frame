@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
                 name, cmd
             );
 
-            let child = spawn_command(cmd, server_cfg.execute_dir.as_deref())?;
+            let child = spawn_command_chain(cmd, server_cfg.execute_dir.as_deref()).await?;
             _child_processes.push(child);
             port_waits.push((name.clone(), host, port));
         }
@@ -230,6 +230,405 @@ async fn start_tls(
 
 // ── Execute helpers ───────────────────────────────────────────────────────────
 
+/// Whether the next segment in a chain should run after the previous one
+/// succeeded or failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainOp {
+    /// `&&` — next segment runs only when the previous exited with code 0.
+    And,
+    /// `||` — next segment runs only when the previous exited non-zero.
+    Or,
+}
+
+/// Split a command string on `&&` and `||` operators while respecting single-
+/// and double-quoted substrings.  Returns `(segment_text, governing_op)`
+/// pairs where `governing_op` is the operator *preceding* the segment (the
+/// first segment always uses `ChainOp::And` as a sentinel — it is always run).
+fn split_command_chain(cmd: &str) -> Vec<(String, ChainOp)> {
+    let mut results: Vec<(String, ChainOp)> = Vec::new();
+    let mut current = String::new();
+    let mut pending_op = ChainOp::And; // sentinel for the first segment
+    let chars: Vec<char> = cmd.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let ch = chars[i];
+
+        // Handle quoted sections — consume until the matching closing quote.
+        if ch == '\'' || ch == '"' {
+            let quote = ch;
+            current.push(ch);
+            i += 1;
+            while i < len && chars[i] != quote {
+                current.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                current.push(chars[i]); // closing quote
+                i += 1;
+            }
+            continue;
+        }
+
+        // Check for `&&` or `||`
+        if i + 1 < len {
+            if ch == '&' && chars[i + 1] == '&' {
+                let seg = current.trim().to_string();
+                if !seg.is_empty() {
+                    results.push((seg, pending_op));
+                }
+                current.clear();
+                pending_op = ChainOp::And;
+                i += 2;
+                continue;
+            }
+            if ch == '|' && chars[i + 1] == '|' {
+                let seg = current.trim().to_string();
+                if !seg.is_empty() {
+                    results.push((seg, pending_op));
+                }
+                current.clear();
+                pending_op = ChainOp::Or;
+                i += 2;
+                continue;
+            }
+        }
+
+        current.push(ch);
+        i += 1;
+    }
+
+    let seg = current.trim().to_string();
+    if !seg.is_empty() {
+        results.push((seg, pending_op));
+    }
+
+    results
+}
+
+/// Strip leading Linux-style `KEY=VALUE` inline environment variable
+/// assignments from the front of a command segment.
+///
+/// Handles:
+/// - Unquoted values:  `PORT=3000 pnpm start`
+/// - Single-quoted:    `MSG='hello world' pnpm start`
+/// - Double-quoted:    `MSG="hello world" pnpm start`
+///
+/// Returns the collected `(key, value)` pairs and the remaining command text.
+fn parse_env_prefix(segment: &str) -> (Vec<(String, String)>, &str) {
+    let bytes = segment.as_bytes();
+    let len = bytes.len();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        // Skip leading whitespace
+        while pos < len && bytes[pos] == b' ' {
+            pos += 1;
+        }
+
+        // Try to match `IDENTIFIER=`
+        let start = pos;
+        while pos < len
+            && (bytes[pos].is_ascii_alphabetic()
+                || bytes[pos] == b'_'
+                || (pos > start && bytes[pos].is_ascii_digit()))
+        {
+            pos += 1;
+        }
+
+        // Must have advanced and must be followed by '='
+        if pos == start || pos >= len || bytes[pos] != b'=' {
+            // Not an env assignment — rewind to start of this token
+            pos = start;
+            break;
+        }
+
+        let key = segment[start..pos].to_string();
+        pos += 1; // skip '='
+
+        // Parse value (may be quoted)
+        let value = if pos < len && (bytes[pos] == b'\'' || bytes[pos] == b'"') {
+            let quote = bytes[pos];
+            pos += 1;
+            let val_start = pos;
+            while pos < len && bytes[pos] != quote {
+                pos += 1;
+            }
+            let val = segment[val_start..pos].to_string();
+            if pos < len {
+                pos += 1; // skip closing quote
+            }
+            val
+        } else {
+            // Unquoted value — read until next space
+            let val_start = pos;
+            while pos < len && bytes[pos] != b' ' {
+                pos += 1;
+            }
+            segment[val_start..pos].to_string()
+        };
+
+        // Make sure something follows (otherwise this is not an env prefix,
+        // it's the entire command, e.g., exporting a variable on its own).
+        // Peek past whitespace.
+        let mut peek = pos;
+        while peek < len && bytes[peek] == b' ' {
+            peek += 1;
+        }
+        if peek >= len {
+            // Nothing after the assignment — not an inline env prefix
+            pos = start;
+            break;
+        }
+
+        pairs.push((key, value));
+    }
+
+    (pairs, &segment[pos..])
+}
+
+/// Return the path argument if `segment` is a `cd` command, otherwise `None`.
+///
+/// Handles:
+/// - `cd ./path`
+/// - `cd /d C:\path`  (Windows flag, stripped)
+/// - `cd 'some path'` / `cd "some path"`
+fn parse_cd_path(segment: &str) -> Option<String> {
+    let s = segment.trim();
+    // Case-insensitive `cd`
+    let rest = if s.to_ascii_lowercase().starts_with("cd") {
+        &s[2..]
+    } else {
+        return None;
+    };
+
+    // Must be end-of-string or whitespace after "cd"
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let rest = rest.trim();
+
+    // Strip Windows `/d` flag
+    let rest = if rest.to_ascii_lowercase().starts_with("/d") {
+        rest[2..].trim()
+    } else {
+        rest
+    };
+
+    if rest.is_empty() {
+        return None; // bare `cd` — no-op
+    }
+
+    // Strip surrounding quotes
+    let path = if (rest.starts_with('\'') && rest.ends_with('\''))
+        || (rest.starts_with('"') && rest.ends_with('"'))
+    {
+        rest[1..rest.len() - 1].to_string()
+    } else {
+        rest.to_string()
+    };
+
+    Some(path)
+}
+
+/// Resolve `..` and `.` components in `path` without touching the filesystem.
+/// `std::fs::canonicalize` requires the path to already exist, but intermediate
+/// build steps may create new directories at runtime.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Spawn a single shell command inside `dir`, injecting `extra_env` pairs.
+/// On Windows uses `cmd /C`; on Unix uses `sh -c`.
+fn spawn_single_command(
+    cmd: &str,
+    dir: &std::path::Path,
+    extra_env: &[(String, String)],
+) -> anyhow::Result<tokio::process::Child> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = tokio::process::Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let mut c = tokio::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+
+    command.current_dir(dir);
+    for (k, v) in extra_env {
+        command.env(k, v);
+    }
+
+    command
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("execute: failed to spawn '{}': {}", cmd, e))
+}
+
+/// Parse and execute a command that may contain `&&` / `||` chains, `cd`
+/// virtual directory changes, and Linux-style `KEY=VAL` inline env prefixes.
+///
+/// All intermediate segments are run to completion before returning; the last
+/// non-`cd` segment is returned as a live `Child` (the long-running server).
+///
+/// # Operator semantics
+/// - `&&` — next segment runs only if the previous exited with code 0.
+/// - `||` — next segment runs only if the previous exited non-zero.
+async fn spawn_command_chain(
+    cmd: &str,
+    base_dir: Option<&str>,
+) -> anyhow::Result<tokio::process::Child> {
+    let virtual_dir = match base_dir {
+        Some(d) => normalize_path(&std::path::PathBuf::from(d)),
+        None => std::env::current_dir()?,
+    };
+    let mut virtual_dir = if virtual_dir.is_absolute() {
+        virtual_dir
+    } else {
+        normalize_path(&std::env::current_dir()?.join(virtual_dir))
+    };
+
+    let segments = split_command_chain(cmd);
+
+    if segments.is_empty() {
+        anyhow::bail!("execute: command is empty");
+    }
+
+    // We need to track whether each segment should run based on the previous
+    // segment's exit status and the governing operator.
+    // `last_success` starts as `true` so the first segment always executes.
+    let mut last_success = true;
+
+    let total = segments.len();
+    for (idx, (raw_seg, op)) in segments.into_iter().enumerate() {
+        let is_last = idx == total - 1;
+
+        // Decide whether this segment runs.
+        let should_run = match op {
+            ChainOp::And => last_success,
+            ChainOp::Or => !last_success,
+        };
+
+        if !should_run {
+            if is_last {
+                anyhow::bail!(
+                    "execute: last command '{}' was skipped by '{}' condition \
+                     (no server process was started)",
+                    raw_seg,
+                    if op == ChainOp::And { "&&" } else { "||" }
+                );
+            }
+            // Keep last_success unchanged — a skipped segment doesn't flip it.
+            continue;
+        }
+
+        // Handle `cd` — virtual directory change.
+        if let Some(cd_path) = parse_cd_path(&raw_seg) {
+            let new_dir = normalize_path(&virtual_dir.join(&cd_path));
+            tracing::info!(
+                "execute: cd '{}' → virtual dir is now '{}'",
+                cd_path,
+                new_dir.display()
+            );
+            virtual_dir = new_dir;
+            // `cd` always counts as success for operator evaluation.
+            last_success = true;
+
+            if is_last {
+                anyhow::bail!(
+                    "execute: command chain ends with 'cd' — no server \
+                     process to start. Add a command after the cd."
+                );
+            }
+            continue;
+        }
+
+        // Strip Linux-style inline env var prefix.
+        let (env_pairs, bare_cmd) = parse_env_prefix(&raw_seg);
+        let bare_cmd = bare_cmd.trim();
+
+        if bare_cmd.is_empty() {
+            anyhow::bail!("execute: empty command segment after env prefix stripping");
+        }
+
+        if !is_last {
+            // Intermediate segment — spawn, wait, record exit status.
+            tracing::info!(
+                "execute: running '{}' in '{}'{}",
+                bare_cmd,
+                virtual_dir.display(),
+                if env_pairs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " with env [{}]",
+                        env_pairs
+                            .iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            );
+
+            let mut child =
+                spawn_single_command(bare_cmd, &virtual_dir, &env_pairs)?;
+            let status = child.wait().await?;
+            last_success = status.success();
+
+            if !last_success {
+                tracing::warn!(
+                    "execute: '{}' exited with {}",
+                    bare_cmd,
+                    status
+                );
+            }
+        } else {
+            // Last segment — this is the long-running server process.
+            tracing::info!(
+                "execute: starting server '{}' in '{}'{}",
+                bare_cmd,
+                virtual_dir.display(),
+                if env_pairs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " with env [{}]",
+                        env_pairs
+                            .iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            );
+
+            return spawn_single_command(bare_cmd, &virtual_dir, &env_pairs);
+        }
+    }
+
+    // Unreachable in practice — the loop always returns or bails on the last segment.
+    anyhow::bail!("execute: no runnable final command found in chain");
+}
+
 /// Parse host and port out of a URL like `http://localhost:5173/path`.
 /// Falls back to port 80 for http and 443 for https when no explicit port.
 fn extract_host_port(url: &str) -> anyhow::Result<(String, u16)> {
@@ -255,37 +654,6 @@ fn extract_host_port(url: &str) -> anyhow::Result<(String, u16)> {
     } else {
         Ok((authority.to_string(), default_port))
     }
-}
-
-/// Spawn a shell command, setting the working directory if provided.
-/// On Windows, delegates to `cmd /C` so that `.cmd` shims (pnpm.cmd, npm.cmd,
-/// yarn.cmd, etc.) are resolved automatically without the caller needing to
-/// know the extension.
-fn spawn_command(
-    cmd: &str,
-    dir: Option<&str>,
-) -> anyhow::Result<tokio::process::Child> {
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut c = tokio::process::Command::new("cmd");
-        c.args(["/C", cmd]);
-        c
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let mut command = {
-        let mut c = tokio::process::Command::new("sh");
-        c.args(["-c", cmd]);
-        c
-    };
-
-    if let Some(dir) = dir {
-        command.current_dir(dir);
-    }
-
-    command.spawn().map_err(|e| {
-        anyhow::anyhow!("execute: failed to spawn '{}': {}", cmd, e)
-    })
 }
 
 /// Poll `host:port` via TCP every 500 ms until a connection succeeds, with a

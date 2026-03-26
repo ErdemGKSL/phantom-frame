@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.2.5
+
+Release date: 2026-03-26
+
+### Added
+
+- **`.env` file loading via `dotenv` config key**. A new top-level `dotenv` field controls whether a `.env` file is loaded before environment variable resolution:
+  - Absent or `false` — disabled (default).
+  - `true` — load `.env` from the current working directory (silently ignored if absent).
+  - `"./path/to/.env"` — load from the given path (error if the file does not exist).
+- **`$env:VAR` interpolation in config values**. Any string value in the TOML config that matches `"$env:VAR_NAME"` is replaced at startup with the value of the corresponding environment variable. If the variable is not set, the key is silently dropped (optional fields become `None`, fields with defaults fall back to their defaults). Works for all string fields — `control_auth`, `proxy_url`, `cert_path`, `key_path`, etc. Pairs naturally with `dotenv` to keep secrets out of the config file.
+- **`&&` / `||` command chaining in `execute`**. Intermediate segments are run to completion in order; the final segment becomes the long-running server process. `&&` runs the next segment only on success (exit code 0); `||` runs it only on failure. Example: `execute = "pnpm install && pnpm run build && pnpm run start"`.
+- **`cd` support in `execute` chains**. A segment that is a `cd <path>` command (including `cd /d` on Windows) changes the virtual working directory for all subsequent segments in the chain without spawning a subprocess.
+- **Inline `KEY=VALUE` env-prefix support in `execute`**. Linux-style `KEY=VALUE cmd` prefixes are parsed and injected as environment variables for that command segment on all platforms. Example: `execute = "PORT=5173 NODE_ENV=production pnpm run start"`.
+- `dotenvy` added as a dependency for `.env` file loading.
+
 ## v0.2.4
 
 Release date: 2026-03-26

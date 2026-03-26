@@ -1,6 +1,6 @@
 [package]
 name = "phantom-frame"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 authors = ["Erdem Göksel <erdem.goksel.dev@gmail.com>"]
 description = "A high-performance prerendering proxy engine with caching support"
@@ -29,6 +29,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 brotli = "8.0"
 flate2 = "1.1"
+dotenvy = "0.15"
 axum-server = { version = "0.7", optional = true }
 
 [features]
