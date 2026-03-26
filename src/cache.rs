@@ -5,53 +5,125 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 
 use crate::compression::ContentEncoding;
 pub use crate::CacheStorageMode;
 
 static BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Enum representing different types of cache refresh triggers
+/// Messages sent via the broadcast channel to invalidate cache entries.
 #[derive(Clone, Debug)]
-pub enum RefreshMessage {
-    /// Refresh all cache entries
+pub enum InvalidationMessage {
+    /// Invalidate all cache entries.
     All,
-    /// Refresh cache entries matching a pattern (supports wildcards)
+    /// Invalidate cache entries whose key matches a pattern (supports wildcards).
     Pattern(String),
 }
 
-/// A trigger that can be cloned and triggered multiple times
-/// Similar to oneshot but reusable
-#[derive(Clone)]
-pub struct RefreshTrigger {
-    sender: broadcast::Sender<RefreshMessage>,
+/// An operation sent to the snapshot worker for runtime SSG management.
+pub(crate) struct SnapshotRequest {
+    pub(crate) op: SnapshotOp,
+    pub(crate) done: oneshot::Sender<()>,
 }
 
-impl RefreshTrigger {
+/// The kind of snapshot operation to perform.
+pub(crate) enum SnapshotOp {
+    /// Fetch `path` from upstream, store in the cache, and track it as a snapshot.
+    Add(String),
+    /// Re-fetch `path` from upstream and overwrite its cache entry.
+    Refresh(String),
+    /// Remove `path` from the cache and from the tracked snapshot list.
+    Remove(String),
+    /// Re-fetch every currently tracked snapshot path.
+    RefreshAll,
+}
+
+/// A cloneable handle for cache management — invalidating entries and (in
+/// PreGenerate mode) managing the list of pre-generated SSG snapshots at runtime.
+#[derive(Clone)]
+pub struct CacheHandle {
+    sender: broadcast::Sender<InvalidationMessage>,
+    /// Present only when the proxy is in `ProxyMode::PreGenerate`.
+    snapshot_tx: Option<mpsc::Sender<SnapshotRequest>>,
+}
+
+impl CacheHandle {
+    /// Create a new handle without snapshot support (Dynamic mode or tests).
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(16);
-        Self { sender }
+        Self {
+            sender,
+            snapshot_tx: None,
+        }
     }
 
-    /// Trigger a full cache refresh (clears all entries)
-    pub fn trigger(&self) {
-        // Ignore errors if there are no receivers
-        let _ = self.sender.send(RefreshMessage::All);
+    /// Create a new handle wired to a snapshot worker (PreGenerate mode).
+    pub(crate) fn new_with_snapshots(snapshot_tx: mpsc::Sender<SnapshotRequest>) -> Self {
+        let (sender, _) = broadcast::channel(16);
+        Self {
+            sender,
+            snapshot_tx: Some(snapshot_tx),
+        }
     }
 
-    /// Trigger a cache refresh for entries matching a pattern
-    /// Supports wildcards: "/api/*", "GET:/api/*", etc.
-    pub fn trigger_by_key_match(&self, pattern: &str) {
-        // Ignore errors if there are no receivers
+    /// Invalidate all cache entries.
+    pub fn invalidate_all(&self) {
+        let _ = self.sender.send(InvalidationMessage::All);
+    }
+
+    /// Invalidate cache entries whose key matches `pattern`.
+    /// Supports wildcards: `"/api/*"`, `"GET:/api/*"`, etc.
+    pub fn invalidate(&self, pattern: &str) {
         let _ = self
             .sender
-            .send(RefreshMessage::Pattern(pattern.to_string()));
+            .send(InvalidationMessage::Pattern(pattern.to_string()));
     }
 
-    /// Subscribe to refresh events
-    pub fn subscribe(&self) -> broadcast::Receiver<RefreshMessage> {
+    /// Subscribe to invalidation events.
+    pub fn subscribe(&self) -> broadcast::Receiver<InvalidationMessage> {
         self.sender.subscribe()
+    }
+
+    /// Send an operation to the snapshot worker and await completion.
+    async fn send_snapshot_op(&self, op: SnapshotOp) -> anyhow::Result<()> {
+        let tx = self.snapshot_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Snapshot operations are only available in PreGenerate proxy mode")
+        })?;
+        let (done_tx, done_rx) = oneshot::channel();
+        tx.send(SnapshotRequest { op, done: done_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("Snapshot worker is not running"))?;
+        done_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Snapshot worker dropped the completion signal"))
+    }
+
+    /// Fetch `path` from the upstream server, store it in the cache, and add it
+    /// to the tracked snapshot list. Only available in PreGenerate mode.
+    pub async fn add_snapshot(&self, path: &str) -> anyhow::Result<()> {
+        self.send_snapshot_op(SnapshotOp::Add(path.to_string()))
+            .await
+    }
+
+    /// Re-fetch `path` from the upstream server and update its cached entry.
+    /// Only available in PreGenerate mode.
+    pub async fn refresh_snapshot(&self, path: &str) -> anyhow::Result<()> {
+        self.send_snapshot_op(SnapshotOp::Refresh(path.to_string()))
+            .await
+    }
+
+    /// Remove `path` from the cache and from the tracked snapshot list.
+    /// Only available in PreGenerate mode.
+    pub async fn remove_snapshot(&self, path: &str) -> anyhow::Result<()> {
+        self.send_snapshot_op(SnapshotOp::Remove(path.to_string()))
+            .await
+    }
+
+    /// Re-fetch every currently tracked snapshot path from the upstream server.
+    /// Only available in PreGenerate mode.
+    pub async fn refresh_all_snapshots(&self) -> anyhow::Result<()> {
+        self.send_snapshot_op(SnapshotOp::RefreshAll).await
     }
 }
 
@@ -109,7 +181,7 @@ pub struct CacheStore {
     store_404: Arc<RwLock<HashMap<String, StoredCachedResponse>>>,
     keys_404: Arc<RwLock<VecDeque<String>>>,
     cache_404_capacity: usize,
-    refresh_trigger: RefreshTrigger,
+    handle: CacheHandle,
     body_store: CacheBodyStore,
 }
 
@@ -342,17 +414,12 @@ fn into_stored_response(body: StoredBody, response: CachedResponse) -> StoredCac
 }
 
 impl CacheStore {
-    pub fn new(refresh_trigger: RefreshTrigger, cache_404_capacity: usize) -> Self {
-        Self::with_storage(
-            refresh_trigger,
-            cache_404_capacity,
-            CacheStorageMode::Memory,
-            None,
-        )
+    pub fn new(handle: CacheHandle, cache_404_capacity: usize) -> Self {
+        Self::with_storage(handle, cache_404_capacity, CacheStorageMode::Memory, None)
     }
 
     pub fn with_storage(
-        refresh_trigger: RefreshTrigger,
+        handle: CacheHandle,
         cache_404_capacity: usize,
         storage_mode: CacheStorageMode,
         cache_directory: Option<PathBuf>,
@@ -362,7 +429,7 @@ impl CacheStore {
             store_404: Arc::new(RwLock::new(HashMap::new())),
             keys_404: Arc::new(RwLock::new(VecDeque::new())),
             cache_404_capacity,
-            refresh_trigger,
+            handle,
             body_store: CacheBodyStore::new(storage_mode, cache_directory),
         }
     }
@@ -509,8 +576,8 @@ impl CacheStore {
         }
     }
 
-    pub fn refresh_trigger(&self) -> &RefreshTrigger {
-        &self.refresh_trigger
+    pub fn handle(&self) -> &CacheHandle {
+        &self.handle
     }
 
     /// Get the number of cached items
@@ -526,7 +593,7 @@ impl CacheStore {
     }
 }
 
-impl Default for RefreshTrigger {
+impl Default for CacheHandle {
     fn default() -> Self {
         Self::new()
     }
@@ -581,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_404_cache_set_get_and_eviction() {
-        let trigger = RefreshTrigger::new();
+        let trigger = CacheHandle::new();
         // capacity 2 for quicker eviction
         let store = CacheStore::new(trigger, 2);
 
@@ -627,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_by_pattern_removes_404_entries() {
-        let trigger = RefreshTrigger::new();
+        let trigger = CacheHandle::new();
         let store = CacheStore::new(trigger, 10);
 
         let resp = CachedResponse {
@@ -651,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn test_filesystem_cache_round_trip() {
         let cache_dir = unique_test_directory("round-trip");
-        let trigger = RefreshTrigger::new();
+        let trigger = CacheHandle::new();
         let store =
             CacheStore::with_storage(trigger, 10, CacheStorageMode::Filesystem, Some(cache_dir));
 
@@ -686,7 +753,7 @@ mod tests {
     #[tokio::test]
     async fn test_filesystem_404_eviction_removes_body_file() {
         let cache_dir = unique_test_directory("eviction");
-        let trigger = RefreshTrigger::new();
+        let trigger = CacheHandle::new();
         let store =
             CacheStore::with_storage(trigger, 2, CacheStorageMode::Filesystem, Some(cache_dir));
 
@@ -731,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn test_filesystem_clear_by_pattern_removes_matching_files() {
         let cache_dir = unique_test_directory("pattern-clear");
-        let trigger = RefreshTrigger::new();
+        let trigger = CacheHandle::new();
         let store =
             CacheStore::with_storage(trigger, 10, CacheStorageMode::Filesystem, Some(cache_dir));
 
@@ -795,7 +862,7 @@ mod tests {
         std::fs::write(not_found_dir.join("stale.bin"), b"stale 404").unwrap();
         std::fs::write(&unrelated_file, b"keep me").unwrap();
 
-        let trigger = RefreshTrigger::new();
+        let trigger = CacheHandle::new();
         let _store = CacheStore::with_storage(
             trigger,
             10,

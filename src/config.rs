@@ -3,6 +3,18 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// TOML-friendly proxy mode selector.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyModeConfig {
+    /// Dynamic mode: requests are proxied and cached on demand.
+    #[default]
+    Dynamic,
+    /// PreGenerate (SSG) mode: a fixed set of paths is fetched at startup and
+    /// served exclusively from the cache.
+    PreGenerate,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -70,6 +82,19 @@ pub struct ServerConfig {
     /// Optional directory override for filesystem-backed cache bodies.
     #[serde(default)]
     pub cache_directory: Option<PathBuf>,
+
+    /// Proxy operating mode. Set to `"pre_generate"` to enable SSG mode.
+    #[serde(default)]
+    pub proxy_mode: ProxyModeConfig,
+
+    /// Paths to pre-generate at startup when `proxy_mode = "pre_generate"`.
+    #[serde(default)]
+    pub pre_generate_paths: Vec<String>,
+
+    /// In PreGenerate mode, fall through to the upstream backend on a cache miss.
+    /// Defaults to `false` (return 404 on miss).
+    #[serde(default = "default_pre_generate_fallthrough")]
+    pub pre_generate_fallthrough: bool,
 }
 
 fn default_enable_websocket() -> bool {
@@ -100,6 +125,10 @@ fn default_use_404_meta() -> bool {
     false
 }
 
+fn default_pre_generate_fallthrough() -> bool {
+    false
+}
+
 impl Config {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -125,6 +154,9 @@ impl Default for ServerConfig {
             compress_strategy: CompressStrategy::default(),
             cache_storage_mode: CacheStorageMode::default(),
             cache_directory: None,
+            proxy_mode: ProxyModeConfig::default(),
+            pre_generate_paths: vec![],
+            pre_generate_fallthrough: false,
         }
     }
 }

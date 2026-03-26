@@ -1,7 +1,7 @@
 use axum::Router;
 use phantom_frame::{
-    cache::{CacheStorageMode, RefreshTrigger},
-    create_proxy, CacheStrategy, CompressStrategy, CreateProxyConfig,
+    cache::CacheHandle,
+    create_proxy, CacheStrategy, CompressStrategy, CreateProxyConfig, ProxyMode,
 };
 use std::path::PathBuf;
 
@@ -26,30 +26,44 @@ async fn main() {
         ])
         .caching_strategy(CacheStrategy::None)
         .compression_strategy(CompressStrategy::Brotli)
-        .with_cache_storage_mode(CacheStorageMode::Filesystem)
+        .with_cache_storage_mode(phantom_frame::CacheStorageMode::Filesystem)
         .with_cache_directory(PathBuf::from("./.phantom-frame-cache"))
         .with_websocket_enabled(true); // Enable WebSocket support (default: true)
 
     // Create proxy - proxy_url is the backend server to proxy requests to
-    let (proxy_app, refresh_trigger): (Router, RefreshTrigger) = create_proxy(proxy_config);
+    let (proxy_app, handle): (Router, CacheHandle) = create_proxy(proxy_config);
 
-    // You can clone and use the refresh_trigger in your code
-    let trigger_clone = refresh_trigger.clone();
+    // You can clone and use the handle in your code
+    let handle_clone = handle.clone();
 
-    // Example: Trigger cache refresh from another part of your application
+    // Example: Trigger cache invalidation from another part of your application
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 
-        // Clear all cache entries
-        trigger_clone.trigger();
-        println!("All cache cleared!");
+        // Invalidate all cache entries
+        handle_clone.invalidate_all();
+        println!("All cache invalidated!");
 
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
-        // Clear only cache entries matching a pattern (supports wildcards)
-        trigger_clone.trigger_by_key_match("GET:/api/*");
-        println!("Cache cleared for GET:/api/* pattern!");
+        // Invalidate only cache entries matching a pattern (supports wildcards)
+        handle_clone.invalidate("GET:/api/*");
+        println!("Cache invalidated for GET:/api/* pattern!");
     });
+
+    // Example: PreGenerate (SSG) mode with snapshot management
+    // let ssg_config = CreateProxyConfig::new("http://localhost:8080".to_string())
+    //     .with_proxy_mode(ProxyMode::PreGenerate {
+    //         paths: vec!["/".to_string(), "/about".to_string(), "/book/1".to_string()],
+    //         fallthrough: false, // return 404 on cache miss (default)
+    //     });
+    // let (ssg_app, ssg_handle) = create_proxy(ssg_config);
+    // // At runtime, manage snapshots:
+    // ssg_handle.add_snapshot("/book/2").await.unwrap();
+    // ssg_handle.refresh_snapshot("/book/1").await.unwrap();
+    // ssg_handle.remove_snapshot("/about").await.unwrap();
+    // ssg_handle.refresh_all_snapshots().await.unwrap();
+    let _ = ProxyMode::Dynamic; // suppress unused import warning
 
     // Start the proxy server
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

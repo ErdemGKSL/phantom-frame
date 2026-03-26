@@ -1,4 +1,4 @@
-use phantom_frame::{config::Config, control, CreateProxyConfig};
+use phantom_frame::{config::{Config, ProxyModeConfig}, control, CreateProxyConfig, ProxyMode};
 use std::env;
 
 #[tokio::main]
@@ -67,12 +67,22 @@ async fn main() -> anyhow::Result<()> {
         proxy_config
     };
 
+    // Map TOML proxy_mode fields to ProxyMode
+    let proxy_mode = match config.server.proxy_mode {
+        ProxyModeConfig::Dynamic => ProxyMode::Dynamic,
+        ProxyModeConfig::PreGenerate => ProxyMode::PreGenerate {
+            paths: config.server.pre_generate_paths.clone(),
+            fallthrough: config.server.pre_generate_fallthrough,
+        },
+    };
+    let proxy_config = proxy_config.with_proxy_mode(proxy_mode);
+
     // Create proxy server with the config
-    let (proxy_app, refresh_trigger) = phantom_frame::create_proxy(proxy_config);
+    let (proxy_app, handle) = phantom_frame::create_proxy(proxy_config);
 
     // Create control server
     let control_app =
-        control::create_control_router(refresh_trigger.clone(), config.server.control_auth.clone());
+        control::create_control_router(handle.clone(), config.server.control_auth.clone());
 
     // Spawn proxy server
     let proxy_addr = format!("0.0.0.0:{}", config.server.proxy_port);

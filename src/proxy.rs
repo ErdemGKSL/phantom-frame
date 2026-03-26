@@ -4,7 +4,7 @@ use crate::compression::{
     decompress_body, identity_acceptable,
 };
 use crate::path_matcher::should_cache_path;
-use crate::{CompressStrategy, CreateProxyConfig};
+use crate::{CompressStrategy, CreateProxyConfig, ProxyMode};
 use axum::{
     body::Body,
     extract::Extension,
@@ -125,6 +125,17 @@ pub async fn proxy_handler(
             if cached_response_is_allowed(&state.config.cache_strategy, &cached) {
                 tracing::debug!("Cache hit for: {} {}", method_str, cache_key);
                 return build_response_from_cache(cached, &headers);
+            }
+        }
+        // PreGenerate mode: serve only from cache, no backend fallthrough on miss
+        if let ProxyMode::PreGenerate { fallthrough, .. } = &state.config.proxy_mode {
+            if !fallthrough {
+                tracing::debug!(
+                    "PreGenerate cache miss for: {} {} — returning 404 (fallthrough disabled)",
+                    method_str,
+                    cache_key
+                );
+                return Err(StatusCode::NOT_FOUND);
             }
         }
         tracing::debug!(
@@ -633,6 +644,58 @@ fn convert_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
         }
     }
     req_headers
+}
+
+/// Fetch a single path from the upstream server, compress it, and store it in the cache.
+/// Used by the snapshot worker for PreGenerate warm-up and runtime snapshot management.
+pub(crate) async fn fetch_and_cache_snapshot(
+    path: &str,
+    proxy_url: &str,
+    cache: &CacheStore,
+    compress_strategy: &CompressStrategy,
+    cache_key_fn: &std::sync::Arc<dyn Fn(&crate::RequestInfo) -> String + Send + Sync>,
+) -> anyhow::Result<()> {
+    let empty_headers = axum::http::HeaderMap::new();
+    let req_info = crate::RequestInfo {
+        method: "GET",
+        path,
+        query: "",
+        headers: &empty_headers,
+    };
+    let cache_key = cache_key_fn(&req_info);
+
+    let client = reqwest::Client::builder()
+        .no_brotli()
+        .no_deflate()
+        .no_gzip()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client for snapshot fetch: {}", e))?;
+
+    let url = format!("{}{}", proxy_url, path);
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch snapshot '{}': {}", path, e))?;
+
+    let status = response.status().as_u16();
+    let response_headers = response.headers().clone();
+    let body_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read snapshot response for '{}': {}", path, e))?
+        .to_vec();
+
+    let upstream_encoding = response_headers
+        .get(axum::http::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok());
+    let normalized = decode_upstream_body(&body_bytes, upstream_encoding)
+        .map_err(|e| anyhow::anyhow!("Failed to decode snapshot body for '{}': {}", path, e))?;
+
+    let cached = build_cached_response(status, &response_headers, &normalized, compress_strategy)?;
+    cache.set(cache_key, cached).await;
+    tracing::debug!("Snapshot pre-generated: {}", path);
+    Ok(())
 }
 
 fn convert_headers_to_map(

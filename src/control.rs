@@ -1,4 +1,4 @@
-use crate::cache::RefreshTrigger;
+use crate::cache::CacheHandle;
 use axum::{
     body::Body,
     extract::State,
@@ -11,16 +11,13 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ControlState {
-    refresh_trigger: RefreshTrigger,
+    handle: CacheHandle,
     auth_token: Option<String>,
 }
 
 impl ControlState {
-    pub fn new(refresh_trigger: RefreshTrigger, auth_token: Option<String>) -> Self {
-        Self {
-            refresh_trigger,
-            auth_token,
-        }
+    pub fn new(handle: CacheHandle, auth_token: Option<String>) -> Self {
+        Self { handle, auth_token }
     }
 }
 
@@ -44,19 +41,16 @@ async fn refresh_cache_handler(
         }
     }
 
-    // Trigger cache refresh
-    state.refresh_trigger.trigger();
-    tracing::info!("Cache refresh triggered via control endpoint");
+    // Trigger cache invalidation
+    state.handle.invalidate_all();
+    tracing::info!("Cache invalidation triggered via control endpoint");
 
     Ok((StatusCode::OK, "Cache refresh triggered"))
 }
 
 /// Create the control server router
-pub fn create_control_router(
-    refresh_trigger: RefreshTrigger,
-    auth_token: Option<String>,
-) -> Router {
-    let state = Arc::new(ControlState::new(refresh_trigger, auth_token));
+pub fn create_control_router(handle: CacheHandle, auth_token: Option<String>) -> Router {
+    let state = Arc::new(ControlState::new(handle, auth_token));
 
     Router::new()
         .route("/refresh-cache", post(refresh_cache_handler))

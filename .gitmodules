@@ -1,3 +1,8 @@
 [submodule "examples/template"]
 	path = examples/template
 	url = https://github.com/ErdemGKSL/phantom-frame-template.git
+	branch = main
+[submodule "examples/ssg-template"]
+	path = examples/ssg-template
+	url = https://github.com/ErdemGKSL/phantom-frame-template.git
+	branch = ssg

@@ -9,11 +9,12 @@ pub mod path_matcher;
 pub mod proxy;
 
 use axum::{extract::Extension, Router};
-use cache::{CacheStore, RefreshTrigger};
+use cache::{CacheHandle, CacheStore};
 use proxy::ProxyState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Controls which backend responses are eligible for caching.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +136,32 @@ impl std::fmt::Display for CacheStorageMode {
     }
 }
 
+/// Controls the operating mode of the proxy.
+#[derive(Clone, Debug, Default)]
+pub enum ProxyMode {
+    /// Dynamic mode: every request is served from cache when available, or
+    /// forwarded to the upstream backend on a cache miss (default).
+    #[default]
+    Dynamic,
+    /// Pre-generate (SSG) mode: a fixed list of `paths` is fetched from the
+    /// upstream server at startup and served exclusively from the cache.
+    ///
+    /// On a cache miss:
+    /// - `fallthrough = false` (default): return 404 immediately.
+    /// - `fallthrough = true`: fall through to the upstream backend.
+    ///
+    /// Use the [`CacheHandle`] returned by [`create_proxy`] to manage snapshots
+    /// at runtime via `add_snapshot`, `refresh_snapshot`, `remove_snapshot`, and
+    /// `refresh_all_snapshots`.
+    PreGenerate {
+        /// The paths to pre-generate at startup (e.g. `"/book/1"`).
+        paths: Vec<String>,
+        /// When `true`, cache misses fall through to the upstream backend.
+        /// Defaults to `false`.
+        fallthrough: bool,
+    },
+}
+
 /// Information about an incoming request for cache key generation
 #[derive(Clone, Debug)]
 pub struct RequestInfo<'a> {
@@ -195,6 +222,9 @@ pub struct CreateProxyConfig {
 
     /// Optional override for filesystem-backed cache bodies.
     pub cache_directory: Option<PathBuf>,
+
+    /// Controls the operating mode of the proxy (Dynamic vs PreGenerate/SSG).
+    pub proxy_mode: ProxyMode,
 }
 
 impl CreateProxyConfig {
@@ -219,6 +249,7 @@ impl CreateProxyConfig {
             compress_strategy: CompressStrategy::Brotli,
             cache_storage_mode: CacheStorageMode::Memory,
             cache_directory: None,
+            proxy_mode: ProxyMode::Dynamic,
         }
     }
 
@@ -300,21 +331,50 @@ impl CreateProxyConfig {
         self.cache_directory = Some(directory.into());
         self
     }
+
+    /// Set the proxy operating mode.
+    /// Use `ProxyMode::PreGenerate { paths, fallthrough }` to enable SSG mode.
+    pub fn with_proxy_mode(mut self, mode: ProxyMode) -> Self {
+        self.proxy_mode = mode;
+        self
+    }
 }
 
 /// The main library interface for using phantom-frame as a library
-/// Returns a proxy handler function and a refresh trigger
-pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
-    let refresh_trigger = RefreshTrigger::new();
+/// Returns a proxy handler function and a cache handle
+pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
+    // In PreGenerate mode, create a channel for the snapshot worker
+    let (handle, snapshot_rx) = if let ProxyMode::PreGenerate { .. } = &config.proxy_mode {
+        let (tx, rx) = mpsc::channel(32);
+        (CacheHandle::new_with_snapshots(tx), Some(rx))
+    } else {
+        (CacheHandle::new(), None)
+    };
+
     let cache = CacheStore::with_storage(
-        refresh_trigger.clone(),
+        handle.clone(),
         config.cache_404_capacity,
         config.cache_storage_mode.clone(),
         config.cache_directory.clone(),
     );
 
-    // Spawn background task to listen for refresh events
-    spawn_refresh_listener(cache.clone());
+    // Spawn background task to listen for invalidation events
+    spawn_invalidation_listener(cache.clone());
+
+    // Spawn snapshot worker (warm-up + runtime snapshot management) in PreGenerate mode
+    if let (Some(rx), ProxyMode::PreGenerate { paths, .. }) =
+        (snapshot_rx, &config.proxy_mode)
+    {
+        let worker = SnapshotWorker {
+            rx,
+            cache: cache.clone(),
+            proxy_url: config.proxy_url.clone(),
+            compress_strategy: config.compress_strategy.clone(),
+            cache_key_fn: config.cache_key_fn.clone(),
+            snapshots: paths.clone(),
+        };
+        tokio::spawn(worker.run());
+    }
 
     let proxy_state = Arc::new(ProxyState::new(cache, config));
 
@@ -322,23 +382,25 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, RefreshTrigger) {
         .fallback(proxy::proxy_handler)
         .layer(Extension(proxy_state));
 
-    (app, refresh_trigger)
+    (app, handle)
 }
 
-/// Create a proxy handler with an existing refresh trigger
-pub fn create_proxy_with_trigger(
-    config: CreateProxyConfig,
-    refresh_trigger: RefreshTrigger,
-) -> Router {
+/// Create a proxy handler with an existing cache handle.
+/// Useful for sharing a single handle across multiple proxy instances so that
+/// invalidation propagates to all caches simultaneously.
+///
+/// Note: snapshot operations (PreGenerate mode warm-up) are not available
+/// through this variant — use [`create_proxy`] for full PreGenerate support.
+pub fn create_proxy_with_handle(config: CreateProxyConfig, handle: CacheHandle) -> Router {
     let cache = CacheStore::with_storage(
-        refresh_trigger,
+        handle,
         config.cache_404_capacity,
         config.cache_storage_mode.clone(),
         config.cache_directory.clone(),
     );
 
-    // Spawn background task to listen for refresh events
-    spawn_refresh_listener(cache.clone());
+    // Spawn background task to listen for invalidation events
+    spawn_invalidation_listener(cache.clone());
 
     let proxy_state = Arc::new(ProxyState::new(cache, config));
 
@@ -347,31 +409,105 @@ pub fn create_proxy_with_trigger(
         .layer(Extension(proxy_state))
 }
 
-/// Spawn a background task to listen for refresh events
-fn spawn_refresh_listener(cache: CacheStore) {
-    let mut receiver = cache.refresh_trigger().subscribe();
+/// Spawn a background task to listen for cache invalidation events.
+fn spawn_invalidation_listener(cache: CacheStore) {
+    let mut receiver = cache.handle().subscribe();
 
     tokio::spawn(async move {
         loop {
             match receiver.recv().await {
-                Ok(cache::RefreshMessage::All) => {
-                    tracing::debug!("Cache refresh triggered: clearing all entries");
+                Ok(cache::InvalidationMessage::All) => {
+                    tracing::debug!("Cache invalidation triggered: clearing all entries");
                     cache.clear().await;
                 }
-                Ok(cache::RefreshMessage::Pattern(pattern)) => {
+                Ok(cache::InvalidationMessage::Pattern(pattern)) => {
                     tracing::debug!(
-                        "Cache refresh triggered: clearing entries matching pattern '{}'",
+                        "Cache invalidation triggered: clearing entries matching pattern '{}'",
                         pattern
                     );
                     cache.clear_by_pattern(&pattern).await;
                 }
                 Err(e) => {
-                    tracing::error!("Refresh trigger channel error: {}", e);
+                    tracing::error!("Invalidation channel error: {}", e);
                     break;
                 }
             }
         }
     });
+}
+
+/// Background worker that handles snapshot warm-up and runtime snapshot operations
+/// for `ProxyMode::PreGenerate`.
+struct SnapshotWorker {
+    rx: mpsc::Receiver<cache::SnapshotRequest>,
+    cache: CacheStore,
+    proxy_url: String,
+    compress_strategy: CompressStrategy,
+    cache_key_fn: Arc<dyn Fn(&RequestInfo) -> String + Send + Sync>,
+    /// Current snapshot list — grows/shrinks via add/remove operations.
+    snapshots: Vec<String>,
+}
+
+impl SnapshotWorker {
+    async fn run(mut self) {
+        // Warm-up: pre-generate all initial snapshot paths before handling requests.
+        let initial = self.snapshots.clone();
+        for path in &initial {
+            if let Err(e) = self.fetch_and_store(path).await {
+                tracing::warn!("Failed to pre-generate snapshot '{}': {}", path, e);
+            }
+        }
+
+        // Process runtime snapshot requests.
+        while let Some(req) = self.rx.recv().await {
+            match req.op {
+                cache::SnapshotOp::Add(path) => {
+                    match self.fetch_and_store(&path).await {
+                        Ok(()) => self.snapshots.push(path),
+                        Err(e) => tracing::warn!("add_snapshot '{}' failed: {}", path, e),
+                    }
+                }
+                cache::SnapshotOp::Refresh(path) => {
+                    if let Err(e) = self.fetch_and_store(&path).await {
+                        tracing::warn!("refresh_snapshot '{}' failed: {}", path, e);
+                    }
+                }
+                cache::SnapshotOp::Remove(path) => {
+                    let empty_headers = axum::http::HeaderMap::new();
+                    let req_info = RequestInfo {
+                        method: "GET",
+                        path: &path,
+                        query: "",
+                        headers: &empty_headers,
+                    };
+                    let key = (self.cache_key_fn)(&req_info);
+                    self.cache.clear_by_pattern(&key).await;
+                    self.snapshots.retain(|s| s != &path);
+                }
+                cache::SnapshotOp::RefreshAll => {
+                    let paths: Vec<String> = self.snapshots.clone();
+                    for path in &paths {
+                        if let Err(e) = self.fetch_and_store(path).await {
+                            tracing::warn!("refresh_all_snapshots '{}' failed: {}", path, e);
+                        }
+                    }
+                }
+            }
+            // Signal completion to the caller.
+            let _ = req.done.send(());
+        }
+    }
+
+    async fn fetch_and_store(&self, path: &str) -> anyhow::Result<()> {
+        proxy::fetch_and_cache_snapshot(
+            path,
+            &self.proxy_url,
+            &self.cache,
+            &self.compress_strategy,
+            &self.cache_key_fn,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -406,9 +542,9 @@ mod tests {
     async fn test_create_proxy() {
         let config = CreateProxyConfig::new("http://localhost:8080".to_string());
         assert_eq!(config.compress_strategy, CompressStrategy::Brotli);
-        let (_app, trigger) = create_proxy(config);
-        trigger.trigger();
-        trigger.trigger_by_key_match("GET:/api/*");
+        let (_app, handle) = create_proxy(config);
+        handle.invalidate_all();
+        handle.invalidate("GET:/api/*");
         // Just ensure it compiles and runs without panic
     }
 }
