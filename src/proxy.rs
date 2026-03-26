@@ -56,7 +56,17 @@ pub async fn proxy_handler(
         let method_str = req.method().as_str();
         let path = req.uri().path();
 
-        if state.config.enable_websocket {
+        // WebSocket / upgrade tunnelling is only meaningful when there is a live
+        // backend to tunnel to.  Pure SSG servers (PreGenerate with fallthrough
+        // disabled) have no backend reachable at request time, so we always
+        // return 501 for them regardless of the `enable_websocket` flag.
+        let ws_allowed = state.config.enable_websocket
+            && match &state.config.proxy_mode {
+                ProxyMode::Dynamic => true,
+                ProxyMode::PreGenerate { fallthrough, .. } => *fallthrough,
+            };
+
+        if ws_allowed {
             tracing::debug!(
                 "Upgrade request detected for {} {}, establishing direct proxy tunnel",
                 method_str,
@@ -65,7 +75,7 @@ pub async fn proxy_handler(
             return handle_upgrade_request(state, req).await;
         } else {
             tracing::warn!(
-                "Upgrade request detected for {} {} but WebSocket support is disabled",
+                "Upgrade request detected for {} {} but WebSocket support is disabled or not available in current proxy mode",
                 method_str,
                 path
             );

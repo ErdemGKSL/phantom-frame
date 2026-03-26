@@ -11,13 +11,13 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ControlState {
-    handle: CacheHandle,
+    handles: Vec<CacheHandle>,
     auth_token: Option<String>,
 }
 
 impl ControlState {
-    pub fn new(handle: CacheHandle, auth_token: Option<String>) -> Self {
-        Self { handle, auth_token }
+    pub fn new(handles: Vec<CacheHandle>, auth_token: Option<String>) -> Self {
+        Self { handles, auth_token }
     }
 }
 
@@ -41,16 +41,24 @@ async fn refresh_cache_handler(
         }
     }
 
-    // Trigger cache invalidation
-    state.handle.invalidate_all();
-    tracing::info!("Cache invalidation triggered via control endpoint");
+    // Trigger cache invalidation on all registered server caches
+    for handle in &state.handles {
+        handle.invalidate_all();
+    }
+    tracing::info!(
+        "Cache invalidation triggered via control endpoint ({} server(s))",
+        state.handles.len()
+    );
 
     Ok((StatusCode::OK, "Cache refresh triggered"))
 }
 
-/// Create the control server router
-pub fn create_control_router(handle: CacheHandle, auth_token: Option<String>) -> Router {
-    let state = Arc::new(ControlState::new(handle, auth_token));
+/// Create the control server router.
+///
+/// `handles` contains one [`CacheHandle`] per named proxy server.
+/// A single `/refresh-cache` call invalidates all of them.
+pub fn create_control_router(handles: Vec<CacheHandle>, auth_token: Option<String>) -> Router {
+    let state = Arc::new(ControlState::new(handles, auth_token));
 
     Router::new()
         .route("/refresh-cache", post(refresh_cache_handler))

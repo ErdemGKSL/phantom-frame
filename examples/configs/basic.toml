@@ -1,11 +1,37 @@
-[server]
+# ── Global settings (no section header) ─────────────────────────────────────
+
+# HTTP listen port (default: 3000)
+http_port = 3000
+
 # Control port for cache management endpoints (default: 17809)
 control_port = 17809
 
-# Proxy port for serving prerendered content (default: 3000)
-proxy_port = 3000
+# Optional: Bearer token for /refresh-cache authentication
+# If set, callers must include: Authorization: Bearer <token>
+# control_auth = "your-secret-token-here"
 
-# The backend URL to proxy requests to (default: http://localhost:8080)
+# Optional: HTTPS port — when set, cert_path and key_path are required.
+# https_port = 443
+# cert_path = "/etc/ssl/certs/fullchain.pem"
+# key_path  = "/etc/ssl/private/privkey.pem"
+
+# ── Server blocks ─────────────────────────────────────────────────────────────
+#
+# Each [server.NAME] block configures one reverse-proxy entry.
+# bind_to controls where it is mounted in the Axum router:
+#
+#   bind_to = "*"      → fallback (catch-all), registered last
+#   bind_to = "/api"   → nested under /api, registered before shorter prefixes
+#
+# Note: Router::nest strips the prefix before forwarding.  If your upstream
+# expects the full path, encode the prefix in proxy_url instead.
+
+[server.default]
+
+# Mount point in the Axum router (default: "*")
+bind_to = "*"
+
+# The backend URL to proxy requests to
 proxy_url = "http://localhost:8080"
 
 # Optional: Paths to include in caching (empty means include all)
@@ -20,15 +46,13 @@ include_paths = ["/api/*", "/public/*", "GET /admin/stats"]
 # Exclude patterns override include patterns
 exclude_paths = ["/api/admin/*", "/api/*/private", "POST *", "PUT *", "DELETE *"]
 
-# Optional: Enable WebSocket and protocol upgrade support (default: true)
-# When enabled, requests with Connection: Upgrade headers will bypass the cache
-# and establish a direct bidirectional TCP tunnel to the backend
-# Set to false to disable WebSocket/upgrade support and return 501 Not Implemented
+# Optional: Enable WebSocket / protocol-upgrade support (default: true)
+# Upgrade requests bypass the cache and establish a direct TCP tunnel to the backend.
+# Only active in Dynamic mode or PreGenerate mode with pre_generate_fallthrough = true.
+# Pure SSG servers always return 501 for upgrade requests.
 enable_websocket = true
 
 # Optional: Only allow GET requests, reject all others (default: false)
-# When enabled, only GET requests are processed; POST, PUT, DELETE, etc. return 405 Method Not Allowed
-# Useful for static site prerendering or development proxying where mutations shouldn't be allowed
 # forward_get_only = false
 
 # Optional: Control which response types are cached (default: "all")
@@ -41,12 +65,22 @@ enable_websocket = true
 
 # Optional: Control where cached response bodies are stored (default: "memory")
 # Available values: "memory", "filesystem"
-# Filesystem mode stores cache bodies under the OS temp directory unless cache_directory is set.
 # cache_storage_mode = "filesystem"
 
 # Optional: Override the directory used for filesystem-backed cache bodies
 # cache_directory = "./.phantom-frame-cache"
 
-# Optional: Bearer token for control endpoint authentication
-# If set, requests to /refresh-cache must include: Authorization: Bearer <control_auth>
-# control_auth = "your-secret-token-here"
+# ── Example: multi-server config (SSG frontend + dynamic API backend) ─────────
+#
+# [server.frontend]
+# bind_to = "*"
+# proxy_url = "http://localhost:5173"
+# proxy_mode = "pre_generate"
+# pre_generate_paths = ["/", "/about", "/blog"]
+# enable_websocket = false   # SSG — no backend at request time
+#
+# [server.api]
+# bind_to = "/api"
+# proxy_url = "http://localhost:8080"
+# proxy_mode = "dynamic"
+# enable_websocket = true
