@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.2.2
+
+Release date: 2026-03-26
+
+### Breaking Changes
+
+- **Multi-server TOML config**: the single `[server]` block is replaced by named `[server.NAME]` blocks. At least one named block is required. Old configs must be migrated.
+- `proxy_port` removed. Replaced by top-level `http_port` (default: `3000`).
+- `control_port` and `control_auth` moved from `[server]` to the TOML root (no section header).
+
+### Added
+
+- **Multi-server support**: multiple `[server.NAME]` blocks can be declared in a single config file. Each block is mounted as an independent Axum router entry.
+- `bind_to` field on each server block:
+  - `"*"` (default) — catch-all fallback, registered last.
+  - Any path prefix (e.g. `"/api"`) — nested via `Router::nest`, registered longest-first so more-specific paths shadow shorter ones.
+- `http_port` (top-level, default `3000`) — HTTP listen port.
+- `https_port` (top-level, optional) — HTTPS listen port. When set, `cert_path` and `key_path` are required.
+- `cert_path` / `key_path` — PEM certificate and private key paths for HTTPS. TLS is served via `axum-server` with rustls (pure-Rust, no system dependencies).
+- Startup validation: missing cert/key when `https_port` is set, or an empty `server` map, produce a clear error before the server starts.
+- `control::create_control_router` now accepts `Vec<CacheHandle>`. A single `/refresh-cache` call invalidates all registered server caches.
+
+### Changed
+
+- **WebSocket / upgrade gating**: `enable_websocket = true` is now ignored in pure SSG mode (`proxy_mode = "pre_generate"` with `pre_generate_fallthrough = false`). Upgrade requests on such servers always return `501 Not Implemented` because there is no live backend to tunnel to. Upgrade support remains fully functional in Dynamic mode and PreGenerate mode with `fallthrough = true`.
+
 ## v0.2.1
 
 Release date: 2026-03-26
