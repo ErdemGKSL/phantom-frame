@@ -9,6 +9,425 @@ A high-performance prerendering proxy engine written in Rust. Cache and serve pr
 ## Features
 
 - 🚀 **Fast caching proxy** - Cache prerendered content and serve it instantly
+- 🗂️ **Multi-server routing** - Declare multiple named `[server.NAME]` blocks in one config, each bound to a different path prefix
+- 🎛️ **Flexible cache strategies** - Disable caching entirely or target HTML, images, and assets only
+- 🗜️ **Cache-aware compression** - Store cached bodies as Brotli, gzip, or deflate and fall back to identity when a client does not support the stored encoding
+- 🔧 **Dual mode operation** - Run as standalone HTTP server or integrate as a library
+- 🔄 **Dynamic cache refresh** - Trigger cache invalidation via control endpoint or programmatically
+- 🔐 **Optional authentication** - Secure control endpoints with bearer token auth
+- ⚡ **Async/await** - Built on Tokio and Axum for high performance
+- 📦 **Easy integration** - Simple API for library usage
+- 🌐 **WebSocket support** - Automatic detection and proxying of WebSocket and other protocol upgrade connections with bidirectional streaming
+- 🔒 **HTTPS / TLS** - Optional TLS listener via `https_port` with rustls (default) or OpenSSL
+- 📸 **SSG / PreGenerate mode** - Pre-fetch a set of paths at startup and serve them exclusively from cache
+
+## Usage
+
+### Mode 1: Standalone HTTP Server
+
+Run as a standalone server with a TOML configuration file:
+
+```bash
+./phantom-frame ./config.toml
+```
+
+#### Configuration File (`config.toml`)
+
+Global settings (ports, TLS, control auth) live at the TOML root without a section header.
+Each proxy entry is declared as a `[server.NAME]` block.
+
+```toml
+# ── Global settings ───────────────────────────────────────────────────────────
+
+# HTTP listen port (default: 3000)
+http_port = 3000
+
+# Control port for cache management endpoints (default: 17809)
+control_port = 17809
+
+# Optional: Bearer token for /refresh-cache authentication
+# If set, callers must include: Authorization: Bearer <token>
+# control_auth = "your-secret-token-here"
+
+# Optional: HTTPS port — cert_path and key_path are required when set
+# https_port = 443
+# cert_path = "/etc/ssl/certs/fullchain.pem"
+# key_path  = "/etc/ssl/private/privkey.pem"
+
+# ── Server blocks ─────────────────────────────────────────────────────────────
+# bind_to = "*"     → catch-all fallback (registered last)
+# bind_to = "/api"  → nested under /api (Router::nest strips the prefix)
+
+[server.default]
+bind_to = "*"
+proxy_url = "http://localhost:8080"
+
+# Optional: Paths to include in caching (empty means include all)
+# Supports wildcards: * can appear anywhere in the pattern
+# Supports method prefixes: "GET /api/*", "POST /*/users", etc.
+include_paths = ["/api/*", "/public/*", "GET /admin/stats"]
+
+# Optional: Paths to exclude from caching (empty means exclude none)
+# Exclude patterns override include patterns
+exclude_paths = ["/api/admin/*", "/api/*/private", "POST *", "PUT *", "DELETE *"]
+
+# Optional: Enable WebSocket and protocol upgrade support (default: true)
+# Only active in Dynamic mode or PreGenerate mode with pre_generate_fallthrough = true.
+# Pure SSG servers always return 501 for upgrade requests.
+enable_websocket = true
+
+# Optional: Only allow GET requests, reject all others (default: false)
+forward_get_only = false
+
+# Optional: Control which response types are cached (default: "all")
+# Available values: "all", "none", "only_html", "no_images", "only_images", "only_assets"
+cache_strategy = "all"
+
+# Optional: Control how cached responses are stored in memory (default: "brotli")
+# Available values: "none", "brotli", "gzip", "deflate"
+compress_strategy = "brotli"
+
+# Optional: Control where cached response bodies are stored (default: "memory")
+# Available values: "memory", "filesystem"
+cache_storage_mode = "memory"
+
+# Optional: Override the directory used for filesystem-backed cache bodies
+# cache_directory = "./.phantom-frame-cache"
+```
+
+#### Multi-Server Config
+
+Multiple backends can be composed into a single Axum router. Longer `bind_to` prefixes are matched first so more-specific routes shadow shorter ones. `bind_to = "*"` is always the catch-all fallback.
+
+> **Note**: `Router::nest("/api", …)` strips the `/api` prefix before the inner handler sees the path. Requests to `/api/users` are forwarded upstream as `/users`. If the upstream expects the full path, include the prefix in `proxy_url`.
+
+```toml
+http_port = 3000
+control_port = 17809
+
+# SSG frontend — pre-generated at startup, no backend at request time
+[server.frontend]
+bind_to = "*"
+proxy_url = "http://localhost:5173"
+proxy_mode = "pre_generate"
+pre_generate_paths = ["/", "/about", "/blog"]
+enable_websocket = false
+
+# Dynamic API backend — requests forwarded and cached on demand
+[server.api]
+bind_to = "/api"
+proxy_url = "http://localhost:8080"
+proxy_mode = "dynamic"
+enable_websocket = true
+```
+
+#### HTTPS / TLS
+
+Set `https_port` at the root to enable a TLS listener. Both `cert_path` and `key_path` are required when this is set. Startup fails with a clear error if either is missing.
+
+```toml
+http_port  = 80
+https_port = 443
+cert_path  = "/etc/ssl/certs/fullchain.pem"
+key_path   = "/etc/ssl/private/privkey.pem"
+
+[server.default]
+bind_to   = "*"
+proxy_url = "http://localhost:8080"
+```
+
+TLS backend is selected by the active Cargo feature:
+- **`rustls`** (default) — pure Rust, no system dependencies (`axum-server/tls-rustls`)
+- **`native-tls`** — OpenSSL (`axum-server/tls-openssl`); requires OpenSSL as a system library
+
+#### SSG / PreGenerate Mode
+
+Set `proxy_mode = "pre_generate"` on a server block to pre-fetch a list of paths at startup.
+
+```toml
+[server.frontend]
+bind_to = "*"
+proxy_url = "http://localhost:5173"
+proxy_mode = "pre_generate"
+pre_generate_paths = ["/", "/about", "/blog/post-1"]
+
+# On a cache miss:
+#   false (default) → return 404 immediately, no backend contact
+#   true            → fall through to the upstream backend
+pre_generate_fallthrough = false
+```
+
+#### Cache Strategies
+
+Use `cache_strategy` to control which backend responses are stored:
+
+- `all`: Cache every response that passes your include/exclude rules.
+- `none`: Disable cache reads and writes entirely. Useful for dev mode or plain proxying.
+- `only_html`: Cache HTML documents only.
+- `no_images`: Cache everything except `image/*` responses.
+- `only_images`: Cache `image/*` responses only.
+- `only_assets`: Cache static/application assets (CSS, JS, JSON, fonts, WebAssembly, XML, images).
+
+#### Cache Compression Strategies
+
+Use `compress_strategy` to control how cached bodies are stored in memory:
+
+- `none`: Store uncompressed.
+- `brotli` (default): Store with Brotli.
+- `gzip`: Store with gzip.
+- `deflate`: Store with deflate.
+
+If the browser does not support the stored encoding, phantom-frame decodes the cached body and serves identity.
+
+#### Cache Body Storage Modes
+
+- `memory` (default): Cached bodies stay in process memory.
+- `filesystem`: Bodies are written to a temp directory (or `cache_directory` if set) and loaded on cache hits. Metadata stays in memory.
+
+#### Path Filtering
+
+- **`include_paths`**: Only paths matching these patterns are cached. Empty = all.
+- **`exclude_paths`**: Paths matching these patterns are never cached. Overrides include.
+- `*` matches any sequence of characters anywhere in a pattern.
+- Method prefixes: `GET /api/*`, `POST *`, `PUT /users/*`.
+
+#### Control Endpoints
+
+**POST /refresh-cache** — invalidate all server caches.
+
+```bash
+# Without authentication
+curl -X POST http://localhost:17809/refresh-cache
+
+# With authentication
+curl -X POST http://localhost:17809/refresh-cache \
+  -H "Authorization: Bearer your-secret-token-here"
+```
+
+### Mode 2: Library Integration
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+phantom-frame = { version = "0.2.3" }
+tokio = { version = "1.40", features = ["full"] }
+axum = "0.8"
+```
+
+Use in your code:
+
+```rust
+use phantom_frame::{
+    create_proxy,
+    cache::CacheHandle,
+    CacheStrategy,
+    CompressStrategy,
+    CreateProxyConfig,
+};
+use axum::Router;
+
+#[tokio::main]
+async fn main() {
+    let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
+        .with_include_paths(vec![
+            "/api/*".to_string(),
+            "/public/*".to_string(),
+            "GET /admin/stats".to_string(),
+        ])
+        .with_exclude_paths(vec![
+            "/api/admin/*".to_string(),
+            "POST *".to_string(),
+            "PUT *".to_string(),
+            "DELETE *".to_string(),
+        ])
+        .caching_strategy(CacheStrategy::OnlyHtml)
+        .compression_strategy(CompressStrategy::Brotli)
+        .with_websocket_enabled(true);
+
+    let (proxy_app, handle): (Router, CacheHandle) = create_proxy(proxy_config);
+
+    // Invalidate all cache entries
+    handle.invalidate_all();
+
+    // Invalidate only entries matching a pattern
+    handle.invalidate("GET:/api/*");
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+        .await
+        .unwrap();
+
+    axum::serve(listener, proxy_app).await.unwrap();
+}
+```
+
+For dev mode or plain proxying without any cache reads/writes:
+
+```rust
+let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
+    .caching_strategy(CacheStrategy::None)
+    .compression_strategy(CompressStrategy::None);
+```
+
+#### Custom Cache Key Function
+
+```rust
+use phantom_frame::{CreateProxyConfig, create_proxy, RequestInfo};
+
+let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
+    .with_cache_key_fn(|req_info: &RequestInfo| {
+        let filtered_query = req_info.query
+            .split('&')
+            .filter(|p| !p.starts_with("session=") && !p.starts_with("token="))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        if filtered_query.is_empty() {
+            format!("{}:{}", req_info.method, req_info.path)
+        } else {
+            format!("{}:{}?{}", req_info.method, req_info.path, filtered_query)
+        }
+    });
+```
+
+The `RequestInfo` struct provides:
+- `method`: HTTP method (e.g., "GET", "POST")
+- `path`: Request path (e.g., "/api/users")
+- `query`: Query string (e.g., "id=123&sort=asc")
+- `headers`: Request headers (for cache key logic based on Accept-Language, User-Agent, etc.)
+
+#### Pattern-Based Cache Invalidation
+
+```rust
+// Clear all cache entries
+handle.invalidate_all();
+
+// Clear entries matching a wildcard pattern
+handle.invalidate("GET:/api/*");
+handle.invalidate("*/users/*");
+handle.invalidate("POST:*");
+```
+
+## WebSocket and Protocol Upgrade Support
+
+phantom-frame automatically detects and handles WebSocket connections and other HTTP protocol upgrades via `Connection: Upgrade` / `Upgrade` headers.
+
+### Mode gating
+
+WebSocket support is only active when the proxy has a live backend to tunnel to:
+
+| `proxy_mode`                                | `enable_websocket = true` | Result          |
+|---------------------------------------------|---------------------------|-----------------|
+| `dynamic`                                   | yes                       | tunnel          |
+| `pre_generate` + `pre_generate_fallthrough = true` | yes              | tunnel          |
+| `pre_generate` + `pre_generate_fallthrough = false` (pure SSG) | any | 501 Not Implemented |
+
+### Disabling WebSocket Support
+
+```toml
+# In server block
+enable_websocket = false
+```
+
+```rust
+// In library mode
+let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
+    .with_websocket_enabled(false);
+```
+
+## TLS Feature Flags
+
+```toml
+# Default — pure Rust, no system dependencies
+phantom-frame = { version = "0.2.3" }
+
+# OpenSSL backend (requires libssl-dev / openssl-devel / OPENSSL_DIR on Windows)
+phantom-frame = { version = "0.2.3", default-features = false, features = ["native-tls"] }
+```
+
+## Building
+
+```bash
+# Build the project (default: rustls)
+cargo build --release
+
+# Build with OpenSSL backend
+cargo build --release --no-default-features --features native-tls
+
+# Run in development
+cargo run -- ./config.toml
+
+# Run the library example
+cargo run --example library_usage
+```
+
+## How It Works
+
+1. **Request Flow**: Incoming request → check 404 cache → check main cache → fetch from backend → store in cache → return response
+2. **WebSocket/Upgrade**: Requests with `Connection: Upgrade` bypass caching and establish a direct bidirectional TCP tunnel to the backend (Dynamic / PreGenerate+fallthrough modes only)
+3. **Multi-Server**: Multiple `[server.NAME]` blocks are composed into one Axum router. Specific prefixes (`/api`) are nested longest-first; `bind_to = "*"` is the fallback
+4. **SSG Mode**: Specified paths are pre-fetched at startup. Cache misses either return 404 immediately or fall through to the backend depending on `pre_generate_fallthrough`
+5. **Cache Refresh**: Invalidation is triggered via `/refresh-cache` or programmatically via `CacheHandle`
+
+## API Reference
+
+### Library API
+
+#### `CreateProxyConfig`
+
+- `CreateProxyConfig::new(proxy_url: String)` — create with defaults
+- `with_include_paths(paths: Vec<String>)`
+- `with_exclude_paths(paths: Vec<String>)`
+- `with_websocket_enabled(enabled: bool)`
+- `with_forward_get_only(enabled: bool)`
+- `with_cache_key_fn(f: impl Fn(&RequestInfo) -> String)`
+- `with_cache_404_capacity(capacity: usize)`
+- `with_use_404_meta(enabled: bool)`
+- `with_cache_strategy(strategy: CacheStrategy)` / `caching_strategy(…)`
+- `with_compress_strategy(strategy: CompressStrategy)` / `compression_strategy(…)`
+- `with_cache_storage_mode(mode: CacheStorageMode)`
+- `with_cache_directory(directory: impl Into<PathBuf>)`
+- `with_proxy_mode(mode: ProxyMode)`
+
+#### `create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle)`
+
+Creates a proxy router and cache handle.
+
+#### `CacheHandle`
+
+- `invalidate_all()` — clear all cache entries
+- `invalidate(pattern: &str)` — clear entries matching a wildcard pattern
+- `add_snapshot(path)` — (PreGenerate) fetch and cache a new path
+- `refresh_snapshot(path)` — (PreGenerate) re-fetch a single cached path
+- `remove_snapshot(path)` — (PreGenerate) evict a path from cache
+- `refresh_all_snapshots()` — (PreGenerate) re-fetch all tracked paths
+
+### Control Endpoints
+
+#### `POST /refresh-cache`
+
+Invalidates all server caches. Requires `Authorization: Bearer <token>` header if `control_auth` is set.
+
+## Limitations and Important Notes
+
+phantom-frame caches a single rendered version per cache key and serves it to all users. This works well for public, user-agnostic content. Avoid caching:
+
+- Cookie- or session-based SSR (personalized content will be served to the wrong user)
+- Pages that vary by user-specific headers (Authorization, Cookie, Session)
+
+**Safe patterns:**
+
+- Use `exclude_paths` to skip routes that depend on session state
+- Set `Cache-Control: private` / `no-store` on the backend for user-specific responses
+- Vary the cache key by safe attributes (Accept-Language) but never by user identifiers
+- Cache a shared skeleton and load user-specific data client-side via XHR/fetch
+
+## License
+
+See LICENSE file for details
+
+
+- 🚀 **Fast caching proxy** - Cache prerendered content and serve it instantly
 - 🎛️ **Flexible cache strategies** - Disable caching entirely or target HTML, images, and assets only
 - 🗜️ **Cache-aware compression** - Store cached bodies as Brotli, gzip, or deflate and fall back to identity when a client does not support the stored encoding
 - 🔧 **Dual mode operation** - Run as standalone HTTP server or integrate as a library
