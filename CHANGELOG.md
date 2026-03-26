@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.7
+
+Release date: 2026-03-26
+
+### Added
+
+- **`cache_key` webhook type**. A new `type = "cache_key"` webhook makes phantom-frame POST the request metadata to a URL and use the plain-text response body as the cache key for that request (both for the cache read and the subsequent cache write). On failure, a non-`2xx` response, a timeout, or an empty body, the default cache key (`method:path?query`) is used instead — the request is never denied by a `cache_key` webhook. Works in both Dynamic and PreGenerate modes.
+- **Redirect passthrough for blocking webhooks**. When a blocking webhook returns a `3xx` status, phantom-frame now forwards the redirect to the client with the `Location` header intact (e.g. `302` + `Location: /login`). Redirects are not followed internally. Previously, `3xx` responses from the webhook server were silently followed by `reqwest`, masking the redirect entirely.
+
+### Changed
+
+- `call_webhook` (internal) now disables `reqwest`'s automatic redirect following (`redirect::Policy::none()`) and returns a richer result that includes the HTTP status, the `Location` header, and the response body.
+
 ## v0.2.6
 
 Release date: 2026-03-26

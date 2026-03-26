@@ -71,18 +71,34 @@ fn build_webhook_payload(
     })
 }
 
+/// Result of a webhook HTTP call.
+struct WebhookCallResult {
+    /// HTTP status returned by the webhook server.
+    status: StatusCode,
+    /// Value of the `Location` header, if present.
+    /// Used to forward redirects to the client when a blocking webhook returns 3xx.
+    location: Option<String>,
+    /// Response body as plain text.
+    /// Used by `cache_key` webhooks to override the cache lookup key.
+    body: String,
+}
+
 /// POST `payload` to `url`.
 ///
+/// Redirects are **not** followed — a `3xx` status is returned as-is so the
+/// caller can forward it to the original client.
+///
 /// Returns:
-/// - `Ok(StatusCode)` — the HTTP status returned by the webhook server.
+/// - `Ok(WebhookCallResult)` — status, optional `Location` header, and body.
 /// - `Err(())` — timeout, connection error, or other transport failure.
 async fn call_webhook(
     url: &str,
     payload: &serde_json::Value,
     timeout_ms: u64,
-) -> Result<StatusCode, ()> {
+) -> Result<WebhookCallResult, ()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| ())?;
 
@@ -93,7 +109,15 @@ async fn call_webhook(
         .await
         .map_err(|_| ())?;
 
-    StatusCode::from_u16(response.status().as_u16()).map_err(|_| ())
+    let status = StatusCode::from_u16(response.status().as_u16()).map_err(|_| ())?;
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body = response.text().await.unwrap_or_default();
+
+    Ok(WebhookCallResult { status, location, body })
 }
 
 /// Main proxy handler that serves prerendered content from cache
@@ -158,6 +182,7 @@ pub async fn proxy_handler(
     // ── Webhook dispatch ────────────────────────────────────────────────────
     // Webhooks fire before cache reads so that access control is enforced even
     // for requests that would otherwise be served from the cache.
+    let mut cache_key_override: Option<String> = None;
     if !state.config.webhooks.is_empty() {
         let payload = build_webhook_payload(method_str, path, query, &headers);
 
@@ -177,7 +202,7 @@ pub async fn proxy_handler(
                 WebhookType::Blocking => {
                     let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
                     match call_webhook(&webhook.url, &payload, timeout_ms).await {
-                        Ok(status) if status.is_success() => {
+                        Ok(result) if result.status.is_success() => {
                             tracing::debug!(
                                 "Blocking webhook '{}' allowed {} {}",
                                 webhook.url,
@@ -185,15 +210,31 @@ pub async fn proxy_handler(
                                 path
                             );
                         }
-                        Ok(status) => {
+                        Ok(result) if result.status.is_redirection() => {
+                            tracing::debug!(
+                                "Blocking webhook '{}' redirecting {} {} to {}",
+                                webhook.url,
+                                method_str,
+                                path,
+                                result.location.as_deref().unwrap_or("(no location)")
+                            );
+                            let mut builder = Response::builder().status(result.status);
+                            if let Some(loc) = &result.location {
+                                builder = builder.header(axum::http::header::LOCATION, loc.as_str());
+                            }
+                            return Ok(builder
+                                .body(Body::empty())
+                                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
+                        }
+                        Ok(result) => {
                             tracing::warn!(
                                 "Blocking webhook '{}' denied {} {} with status {}",
                                 webhook.url,
                                 method_str,
                                 path,
-                                status
+                                result.status
                             );
-                            return Err(status);
+                            return Err(result.status);
                         }
                         Err(()) => {
                             tracing::warn!(
@@ -203,6 +244,48 @@ pub async fn proxy_handler(
                                 path
                             );
                             return Err(StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                    }
+                }
+                WebhookType::CacheKey => {
+                    let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
+                    match call_webhook(&webhook.url, &payload, timeout_ms).await {
+                        Ok(result) if result.status.is_success() => {
+                            let key = result.body.trim().to_string();
+                            if !key.is_empty() {
+                                tracing::debug!(
+                                    "Cache key webhook '{}' set key '{}' for {} {}",
+                                    webhook.url,
+                                    key,
+                                    method_str,
+                                    path
+                                );
+                                cache_key_override = Some(key);
+                            } else {
+                                tracing::warn!(
+                                    "Cache key webhook '{}' returned empty body for {} {} — using default key",
+                                    webhook.url,
+                                    method_str,
+                                    path
+                                );
+                            }
+                        }
+                        Ok(result) => {
+                            tracing::warn!(
+                                "Cache key webhook '{}' returned non-2xx {} for {} {} — using default key",
+                                webhook.url,
+                                result.status,
+                                method_str,
+                                path
+                            );
+                        }
+                        Err(()) => {
+                            tracing::warn!(
+                                "Cache key webhook '{}' timed out or failed for {} {} — using default key",
+                                webhook.url,
+                                method_str,
+                                path
+                            );
                         }
                     }
                 }
@@ -225,7 +308,8 @@ pub async fn proxy_handler(
         query,
         headers: &headers,
     };
-    let cache_key = (state.config.cache_key_fn)(&req_info);
+    let cache_key = cache_key_override
+        .unwrap_or_else(|| (state.config.cache_key_fn)(&req_info));
     let cache_reads_enabled = !matches!(state.config.cache_strategy, crate::CacheStrategy::None);
 
     // Try to get 404 cache first (available even if should_cache is false)

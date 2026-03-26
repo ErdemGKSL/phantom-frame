@@ -142,10 +142,15 @@ impl std::fmt::Display for CacheStorageMode {
 pub enum WebhookType {
     /// The webhook call must complete with a 2xx response before the request is forwarded.
     /// A non-2xx response (or a timeout / network error) causes the request to be denied.
+    /// A 3xx response is forwarded to the client as a redirect with the `Location` header intact.
     Blocking,
     /// The webhook call is dispatched in the background without blocking the request.
     #[default]
     Notify,
+    /// The webhook response body (plain text) is used as the cache key for this request.
+    /// On failure, a non-2xx response, or an empty body, the default cache key is used instead.
+    /// Works in both Dynamic and PreGenerate modes.
+    CacheKey,
 }
 
 /// Configuration for a single webhook attached to a server.
