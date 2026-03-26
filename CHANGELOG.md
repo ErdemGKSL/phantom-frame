@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.10
+
+Release date: 2026-03-26
+
+### Fixed
+
+- **Snapshot broadcast returns an error when no PreGenerate servers are available**. Previously, calling `/add_snapshot`, `/refresh_snapshot`, `/remove_snapshot`, or `/refresh_all_snapshots` without a `"server"` field would silently succeed (returning `200 OK`) when all configured servers are in Dynamic mode. Now returns `400 Bad Request` with `"No servers running in PreGenerate mode — snapshot operations are not available"`.
+
 ## v0.2.9
 
 Release date: 2026-03-26

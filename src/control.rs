@@ -58,12 +58,21 @@ impl ControlState {
         server: Option<&str>,
     ) -> Result<Vec<&CacheHandle>, (StatusCode, String)> {
         match server {
-            None => Ok(self
-                .handles
-                .iter()
-                .filter(|(_, h)| h.is_snapshot_capable())
-                .map(|(_, h)| h)
-                .collect()),
+            None => {
+                let handles: Vec<&CacheHandle> = self
+                    .handles
+                    .iter()
+                    .filter(|(_, h)| h.is_snapshot_capable())
+                    .map(|(_, h)| h)
+                    .collect();
+                if handles.is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "No servers running in PreGenerate mode — snapshot operations are not available".to_string(),
+                    ));
+                }
+                Ok(handles)
+            }
             Some(name) => {
                 let matched: Vec<&CacheHandle> = self
                     .handles
