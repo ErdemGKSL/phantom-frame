@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.2.1
+
+Release date: 2026-03-26
+
+### Breaking Changes
+
+- `RefreshTrigger` renamed to `CacheHandle`. Update all usages of `phantom_frame::cache::RefreshTrigger` to `phantom_frame::cache::CacheHandle`.
+- Methods on `CacheHandle` renamed:
+  - `trigger()` → `invalidate_all()`
+  - `trigger_by_key_match(pattern)` → `invalidate(pattern)`
+- `create_proxy_with_trigger()` renamed to `create_proxy_with_handle()`.
+
+### Added
+
+- **PreGenerate (SSG) mode** via `ProxyMode::PreGenerate { paths, fallthrough }`:
+  - Specified paths are pre-fetched from the upstream server at startup and served exclusively from the cache.
+  - `fallthrough: false` (default) — cache misses return 404 immediately without contacting the backend.
+  - `fallthrough: true` — cache misses fall through to the upstream backend.
+- `CacheHandle` gains four async snapshot-management methods (only available in PreGenerate mode):
+  - `add_snapshot(path)` — fetch and cache a new path, append it to the snapshot list.
+  - `refresh_snapshot(path)` — re-fetch a single path from the backend and overwrite its cache entry.
+  - `remove_snapshot(path)` — evict a path from the cache and remove it from the snapshot list.
+  - `refresh_all_snapshots()` — re-fetch every tracked snapshot path.
+- `ProxyMode` enum exported from the crate root.
+- TOML config fields for PreGenerate mode:
+  - `proxy_mode = "pre_generate"` (or `"dynamic"`, the default)
+  - `pre_generate_paths = ["/book/1", "/about"]`
+  - `pre_generate_fallthrough = false`
+- `CreateProxyConfig::with_proxy_mode(mode)` builder method.
+
 ## v0.1.19
 
 Release date: 2026-03-23
