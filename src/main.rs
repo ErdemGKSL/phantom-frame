@@ -27,6 +27,31 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Control port: {}", config.control_port);
     tracing::info!("Server entries: {}", config.server.len());
 
+    // ── Spawn execute commands and wait for their ports ──────────────────────
+    // Collect servers that have an `execute` command.
+    // Spawn all processes first so they boot concurrently, then wait for each.
+    let mut _child_processes: Vec<tokio::process::Child> = Vec::new();
+    let mut port_waits: Vec<(String, String, u16)> = Vec::new(); // (name, host, port)
+
+    for (name, server_cfg) in &config.server {
+        if let Some(ref cmd) = server_cfg.execute {
+            let (host, port) = extract_host_port(&server_cfg.proxy_url)?;
+
+            tracing::info!(
+                "server '{}': spawning command: {}",
+                name, cmd
+            );
+
+            let child = spawn_command(cmd, server_cfg.execute_dir.as_deref())?;
+            _child_processes.push(child);
+            port_waits.push((name.clone(), host, port));
+        }
+    }
+
+    for (name, host, port) in port_waits {
+        wait_for_port(&name, &host, port).await?;
+    }
+
     // ── Build per-server routers ────────────────────────────────────────────
     // Collect (name, bind_to, router, handle) tuples.
     let mut entries: Vec<(String, String, Router, CacheHandle)> = Vec::new();
@@ -201,4 +226,97 @@ async fn start_tls(
         .serve(app.into_make_service())
         .await
         .map_err(Into::into)
+}
+
+// ── Execute helpers ───────────────────────────────────────────────────────────
+
+/// Parse host and port out of a URL like `http://localhost:5173/path`.
+/// Falls back to port 80 for http and 443 for https when no explicit port.
+fn extract_host_port(url: &str) -> anyhow::Result<(String, u16)> {
+    // Strip scheme
+    let rest = if let Some(s) = url.strip_prefix("https://") {
+        (s, 443u16)
+    } else if let Some(s) = url.strip_prefix("http://") {
+        (s, 80u16)
+    } else {
+        anyhow::bail!("execute: unsupported scheme in proxy_url '{}'", url);
+    };
+
+    let (authority, default_port) = rest;
+    // Drop any path component
+    let authority = authority.split('/').next().unwrap_or(authority);
+
+    if let Some(colon) = authority.rfind(':') {
+        let host = authority[..colon].to_string();
+        let port: u16 = authority[colon + 1..]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("execute: invalid port in proxy_url '{}'", url))?;
+        Ok((host, port))
+    } else {
+        Ok((authority.to_string(), default_port))
+    }
+}
+
+/// Spawn a shell command, setting the working directory if provided.
+/// On Windows, delegates to `cmd /C` so that `.cmd` shims (pnpm.cmd, npm.cmd,
+/// yarn.cmd, etc.) are resolved automatically without the caller needing to
+/// know the extension.
+fn spawn_command(
+    cmd: &str,
+    dir: Option<&str>,
+) -> anyhow::Result<tokio::process::Child> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = tokio::process::Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let mut c = tokio::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+
+    command.spawn().map_err(|e| {
+        anyhow::anyhow!("execute: failed to spawn '{}': {}", cmd, e)
+    })
+}
+
+/// Poll `host:port` via TCP every 500 ms until a connection succeeds, with a
+/// hard 360-second timeout. Logs progress so the user can see what is pending.
+async fn wait_for_port(name: &str, host: &str, port: u16) -> anyhow::Result<()> {
+    use tokio::time::{sleep, timeout, Duration};
+
+    tracing::info!(
+        "server '{}': waiting for port {} on {} to accept connections …",
+        name, port, host
+    );
+
+    let addr = format!("{}:{}", host, port);
+    let result = timeout(Duration::from_secs(360), async {
+        loop {
+            match tokio::net::TcpStream::connect(&addr).await {
+                Ok(_) => return,
+                Err(_) => sleep(Duration::from_millis(500)).await,
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(()) => {
+            tracing::info!("server '{}': port {} is ready", name, port);
+            Ok(())
+        }
+        Err(_) => anyhow::bail!(
+            "server '{}': timed out waiting for port {} on {} after 360 s",
+            name, port, host
+        ),
+    }
 }

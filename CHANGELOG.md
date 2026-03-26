@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.2.4
+
+Release date: 2026-03-26
+
+### Added
+
+- **`execute` and `execute_dir` fields on `[server.NAME]`**. When set, phantom-frame spawns the specified command before the proxy begins serving traffic and polls `proxy_url`'s TCP port every 500 ms until it accepts connections (360 s hard timeout). All processes are spawned concurrently so multiple servers start booting in parallel.
+  - `execute = "pnpm run dev"` — shell command to run.
+  - `execute_dir = "./apps/client"` — optional working directory (relative to where phantom-frame is invoked).
+  - Cross-platform: on Windows commands are dispatched via `cmd /C`, which resolves `.cmd` shims (`pnpm.cmd`, `npm.cmd`, `yarn.cmd`, etc.) transparently. On Unix, `sh -c` is used.
+
+### Changed
+
+- **Control server endpoints renamed to match the `CacheHandle` API**. The previous `/refresh-cache` endpoint has been replaced. All new routes use underscore-separated names that mirror the corresponding `CacheHandle` methods:
+  - `POST /invalidate_all` — invalidate every cached entry across all servers (replaces `/refresh-cache`).
+  - `POST /invalidate` — invalidate entries matching a wildcard pattern. Body: `{ "pattern": "..." }`.
+  - `POST /add_snapshot` — fetch a path from upstream, cache it, and add it to the snapshot list (PreGenerate mode only). Body: `{ "path": "..." }`.
+  - `POST /refresh_snapshot` — re-fetch a single cached snapshot from upstream (PreGenerate mode only). Body: `{ "path": "..." }`.
+  - `POST /remove_snapshot` — remove a path from the cache and snapshot list (PreGenerate mode only). Body: `{ "path": "..." }`.
+  - `POST /refresh_all_snapshots` — re-fetch every tracked snapshot from upstream (PreGenerate mode only).
+- Snapshot endpoints called against a `Dynamic`-mode proxy return `400 Bad Request` with a descriptive error message.
+
+### Breaking Changes
+
+- `POST /refresh-cache` has been removed. Replace with `POST /invalidate_all`.
+
 ## v0.2.3
 
 Release date: 2026-03-26

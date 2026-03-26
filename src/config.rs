@@ -144,6 +144,21 @@ pub struct ServerConfig {
     /// Defaults to `false` (return 404 on miss).
     #[serde(default = "default_pre_generate_fallthrough")]
     pub pre_generate_fallthrough: bool,
+
+    /// Optional shell command to execute before the proxy starts for this server.
+    /// phantom-frame will spawn the process and wait until `proxy_url`'s port
+    /// accepts TCP connections before serving traffic.
+    ///
+    /// Example: `"pnpm run dev"`, `"cargo run --release"`
+    #[serde(default)]
+    pub execute: Option<String>,
+
+    /// Working directory for the `execute` command.
+    /// Relative paths are resolved from the directory where phantom-frame is run.
+    ///
+    /// Example: `"./apps/client"`
+    #[serde(default)]
+    pub execute_dir: Option<String>,
 }
 
 // ── defaults ────────────────────────────────────────────────────────────────
@@ -228,6 +243,8 @@ impl Default for ServerConfig {
             proxy_mode: ProxyModeConfig::default(),
             pre_generate_paths: vec![],
             pre_generate_fallthrough: false,
+            execute: None,
+            execute_dir: None,
         }
     }
 }

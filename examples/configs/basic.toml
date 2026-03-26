@@ -79,8 +79,16 @@ enable_websocket = true
 # pre_generate_paths = ["/", "/about", "/blog"]
 # enable_websocket = false   # SSG — no backend at request time
 #
+# Optional: spawn a command and wait for proxy_url's port to accept connections.
+# phantom-frame polls the port every 500 ms (360 s timeout) before serving.
+# On Windows, commands are run via `cmd /C` so pnpm.cmd / npm.cmd etc. work as-is.
+# execute = "pnpm run dev"
+# execute_dir = "./apps/client"   # working directory (relative to where phantom-frame runs)
+#
 # [server.api]
 # bind_to = "/api"
 # proxy_url = "http://localhost:8080"
 # proxy_mode = "dynamic"
 # enable_websocket = true
+# execute = "cargo run --release"
+# execute_dir = "./apps/server"
