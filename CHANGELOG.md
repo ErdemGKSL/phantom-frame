@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.3
+
+Release date: 2026-03-26
+
+### Changed
+
+- **Default feature changed from `native-tls` to `rustls`**. The default build now uses `axum-server/tls-rustls` + `reqwest/rustls-tls` — pure Rust, no system dependencies.
+- `native-tls` feature now uses `axum-server/tls-openssl` for server-side TLS. Requires OpenSSL as a system library (`libssl-dev` on Ubuntu, `openssl-devel` on Fedora, vcpkg/`OPENSSL_DIR` on Windows).
+
 ## v0.2.2
 
 Release date: 2026-03-26
@@ -18,7 +27,10 @@ Release date: 2026-03-26
   - Any path prefix (e.g. `"/api"`) — nested via `Router::nest`, registered longest-first so more-specific paths shadow shorter ones.
 - `http_port` (top-level, default `3000`) — HTTP listen port.
 - `https_port` (top-level, optional) — HTTPS listen port. When set, `cert_path` and `key_path` are required.
-- `cert_path` / `key_path` — PEM certificate and private key paths for HTTPS. TLS is served via `axum-server` with rustls (pure-Rust, no system dependencies).
+- `cert_path` / `key_path` — PEM certificate and private key paths for HTTPS.
+  - `rustls` feature (default): TLS via `axum-server/tls-rustls` — pure Rust, no system dependencies.
+  - `native-tls` feature: TLS via `axum-server/tls-openssl` — requires OpenSSL installed as a system library.
+- **Default feature changed from `native-tls` to `rustls`**. Users who relied on the previous default must now explicitly opt in with `--features native-tls --no-default-features`.
 - Startup validation: missing cert/key when `https_port` is set, or an empty `server` map, produce a clear error before the server starts.
 - `control::create_control_router` now accepts `Vec<CacheHandle>`. A single `/refresh-cache` call invalidates all registered server caches.
 

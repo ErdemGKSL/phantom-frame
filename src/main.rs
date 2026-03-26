@@ -173,11 +173,7 @@ async fn run_https_server(
     start_tls(addr, cert_path, key_path, app).await
 }
 
-// Server-side TLS uses rustls via axum-server for both the `rustls` and
-// `native-tls` features. axum-server supports tls-rustls and tls-openssl;
-// on Windows native-tls maps to SChannel which axum-server does not support,
-// and tls-openssl requires a system OpenSSL installation. rustls is
-// pure-Rust and works everywhere without system dependencies.
+#[cfg(feature = "rustls")]
 async fn start_tls(
     addr: std::net::SocketAddr,
     cert_path: PathBuf,
@@ -187,6 +183,21 @@ async fn start_tls(
     let tls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path).await?;
     axum_server::bind_rustls(addr, tls_config)
+        .serve(app.into_make_service())
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(feature = "native-tls")]
+async fn start_tls(
+    addr: std::net::SocketAddr,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    app: Router,
+) -> anyhow::Result<()> {
+    let tls_config =
+        axum_server::tls_openssl::OpenSSLConfig::from_pem_file(cert_path, key_path)?;
+    axum_server::bind_openssl(addr, tls_config)
         .serve(app.into_make_service())
         .await
         .map_err(Into::into)

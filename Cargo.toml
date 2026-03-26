@@ -1,6 +1,6 @@
 [package]
 name = "phantom-frame"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Erdem Göksel <erdem.goksel.dev@gmail.com>"]
 description = "A high-performance prerendering proxy engine with caching support"
@@ -32,12 +32,8 @@ flate2 = "1.1"
 axum-server = { version = "0.7", optional = true }
 
 [features]
-default = ["native-tls"]
-# Server-side TLS uses rustls via axum-server for both features.
-# axum-server has tls-rustls and tls-openssl but no SChannel (Windows native-tls);
-# rustls is pure-Rust and works on all platforms without system dependencies.
-# The native-tls feature only affects outbound reqwest client connections.
-native-tls = ["reqwest/native-tls", "dep:axum-server", "axum-server/tls-rustls"]
+default = ["rustls"]
+native-tls = ["reqwest/native-tls", "dep:axum-server", "axum-server/tls-openssl"]
 rustls = ["reqwest/rustls-tls", "dep:axum-server", "axum-server/tls-rustls"]
 
 [lib]
