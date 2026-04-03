@@ -193,15 +193,35 @@ If the browser does not support the stored encoding, phantom-frame decodes the c
 
 #### Control Endpoints
 
-**POST /refresh-cache** — invalidate all server caches.
+Use the control server port configured by `control_port`.
+
+- `POST /invalidate_all` — invalidate all server caches
+- `POST /invalidate` — invalidate one wildcard pattern with `{ "pattern": "/api/*", "server": "frontend" }`
+- `POST /bulk_invalidate` — invalidate multiple wildcard patterns with `{ "patterns": ["/api/*", "/blog/*"], "server": "frontend" }`
+- `POST /add_snapshot` — add one snapshot path with `{ "path": "/about", "server": "frontend" }`
+- `POST /bulk_add_snapshot` — add multiple snapshot paths with `{ "paths": ["/about", "/pricing"], "server": "frontend" }`
+- `POST /refresh_snapshot` — refresh one snapshot path with `{ "path": "/about", "server": "frontend" }`
+- `POST /bulk_refresh_snapshot` — refresh multiple snapshot paths with `{ "paths": ["/about", "/pricing"], "server": "frontend" }`
+- `POST /remove_snapshot` — remove one snapshot path with `{ "path": "/about", "server": "frontend" }`
+- `POST /bulk_remove_snapshot` — remove multiple snapshot paths with `{ "paths": ["/about", "/pricing"], "server": "frontend" }`
+- `POST /refresh_all_snapshots` — refresh all tracked snapshots, optionally scoped with `{ "server": "frontend" }`
+
+Bulk endpoints return a structured JSON summary with `requested`, `succeeded`, `failed`, and per-item `results` so callers can handle partial success.
 
 ```bash
 # Without authentication
-curl -X POST http://localhost:17809/refresh-cache
+curl -X POST http://localhost:17809/invalidate_all
+
+# Invalidate multiple patterns on one server
+curl -X POST http://localhost:17809/bulk_invalidate \
+    -H "Content-Type: application/json" \
+    -d '{"patterns":["/api/*","/blog/*"],"server":"frontend"}'
 
 # With authentication
-curl -X POST http://localhost:17809/refresh-cache \
+curl -X POST http://localhost:17809/bulk_refresh_snapshot \
   -H "Authorization: Bearer your-secret-token-here"
+    -H "Content-Type: application/json" \
+    -d '{"paths":["/about","/pricing"]}'
 ```
 
 ### Mode 2: Library Integration
@@ -210,7 +230,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phantom-frame = { version = "0.2.3" }
+phantom-frame = { version = "0.2.11" }
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8"
 ```
@@ -339,10 +359,10 @@ let proxy_config = CreateProxyConfig::new("http://localhost:8080".to_string())
 
 ```toml
 # Default — pure Rust, no system dependencies
-phantom-frame = { version = "0.2.3" }
+phantom-frame = { version = "0.2.11" }
 
 # OpenSSL backend (requires libssl-dev / openssl-devel / OPENSSL_DIR on Windows)
-phantom-frame = { version = "0.2.3", default-features = false, features = ["native-tls"] }
+phantom-frame = { version = "0.2.11", default-features = false, features = ["native-tls"] }
 ```
 
 ## Building
@@ -404,9 +424,20 @@ Creates a proxy router and cache handle.
 
 ### Control Endpoints
 
-#### `POST /refresh-cache`
+The standalone executable exposes these control routes on the control port. All routes require `Authorization: Bearer <token>` when `control_auth` is set.
 
-Invalidates all server caches. Requires `Authorization: Bearer <token>` header if `control_auth` is set.
+- `POST /invalidate_all`
+- `POST /invalidate`
+- `POST /bulk_invalidate`
+- `POST /add_snapshot`
+- `POST /bulk_add_snapshot`
+- `POST /refresh_snapshot`
+- `POST /bulk_refresh_snapshot`
+- `POST /remove_snapshot`
+- `POST /bulk_remove_snapshot`
+- `POST /refresh_all_snapshots`
+
+Bulk routes accept a shared optional `server` plus a `patterns` or `paths` array and return per-item partial-success details.
 
 ## Limitations and Important Notes
 
@@ -622,15 +653,28 @@ exclude_paths = ["POST /api/*", "PUT /api/*", "/api/*/private"]
 
 #### Control Endpoints
 
-**POST /refresh-cache** - Trigger cache invalidation
+Use the configured control port for runtime cache and snapshot management.
+
+- `POST /invalidate_all` - Trigger full cache invalidation
+- `POST /invalidate` - Invalidate a single wildcard pattern
+- `POST /bulk_invalidate` - Invalidate multiple wildcard patterns in one request
+- `POST /add_snapshot` - Add one snapshot path
+- `POST /bulk_add_snapshot` - Add multiple snapshot paths in one request
+- `POST /refresh_snapshot` - Refresh one snapshot path
+- `POST /bulk_refresh_snapshot` - Refresh multiple snapshot paths in one request
+- `POST /remove_snapshot` - Remove one snapshot path
+- `POST /bulk_remove_snapshot` - Remove multiple snapshot paths in one request
+- `POST /refresh_all_snapshots` - Refresh all tracked snapshot paths
 
 ```bash
 # Without authentication
-curl -X POST http://localhost:17809/refresh-cache
+curl -X POST http://localhost:17809/invalidate_all
 
 # With authentication (if control_auth is set)
-curl -X POST http://localhost:17809/refresh-cache \
+curl -X POST http://localhost:17809/bulk_add_snapshot \
   -H "Authorization: Bearer your-secret-token-here"
+    -H "Content-Type: application/json" \
+    -d '{"paths":["/about","/pricing"],"server":"frontend"}'
 ```
 
 ### Mode 2: Library Integration
@@ -639,7 +683,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phantom-frame = { version = "0.1.17" }
+phantom-frame = { version = "0.2.11" }
 tokio = { version = "1.40", features = ["full"] }
 axum = "0.8.6"
 ```
@@ -953,9 +997,20 @@ A clonable trigger for cache invalidation.
 
 ### Control Endpoints
 
-#### `POST /refresh-cache`
+The control server supports the same runtime routes described above:
 
-Triggers cache invalidation. Requires `Authorization: Bearer <token>` header if `control_auth` is configured.
+- `POST /invalidate_all`
+- `POST /invalidate`
+- `POST /bulk_invalidate`
+- `POST /add_snapshot`
+- `POST /bulk_add_snapshot`
+- `POST /refresh_snapshot`
+- `POST /bulk_refresh_snapshot`
+- `POST /remove_snapshot`
+- `POST /bulk_remove_snapshot`
+- `POST /refresh_all_snapshots`
+
+Bulk routes return JSON summaries with per-item success or error details. All routes require `Authorization: Bearer <token>` when `control_auth` is configured.
 
 ## Limitations and important notes
 

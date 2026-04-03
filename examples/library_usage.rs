@@ -1,7 +1,6 @@
 use axum::Router;
 use phantom_frame::{
-    cache::CacheHandle,
-    create_proxy, CacheStrategy, CompressStrategy, CreateProxyConfig, ProxyMode,
+    cache::CacheHandle, create_proxy, CacheStrategy, CompressStrategy, CreateProxyConfig, ProxyMode,
 };
 use std::path::PathBuf;
 

@@ -37,10 +37,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref cmd) = server_cfg.execute {
             let (host, port) = extract_host_port(&server_cfg.proxy_url)?;
 
-            tracing::info!(
-                "server '{}': spawning command: {}",
-                name, cmd
-            );
+            tracing::info!("server '{}': spawning command: {}", name, cmd);
 
             let child = spawn_command_chain(cmd, server_cfg.execute_dir.as_deref()).await?;
             _child_processes.push(child);
@@ -127,8 +124,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Control server ───────────────────────────────────────────────────────
-    let control_app =
-        control::create_control_router(handles, config.control_auth.clone());
+    let control_app = control::create_control_router(handles, config.control_auth.clone());
 
     // ── HTTP listener ────────────────────────────────────────────────────────
     let http_addr = format!("0.0.0.0:{}", config.http_port);
@@ -222,8 +218,7 @@ async fn start_tls(
     key_path: PathBuf,
     app: Router,
 ) -> anyhow::Result<()> {
-    let tls_config =
-        axum_server::tls_openssl::OpenSSLConfig::from_pem_file(cert_path, key_path)?;
+    let tls_config = axum_server::tls_openssl::OpenSSLConfig::from_pem_file(cert_path, key_path)?;
     axum_server::bind_openssl(addr, tls_config)
         .serve(app.into_make_service())
         .await
@@ -591,17 +586,12 @@ async fn spawn_command_chain(
                 }
             );
 
-            let mut child =
-                spawn_single_command(bare_cmd, &virtual_dir, &env_pairs)?;
+            let mut child = spawn_single_command(bare_cmd, &virtual_dir, &env_pairs)?;
             let status = child.wait().await?;
             last_success = status.success();
 
             if !last_success {
-                tracing::warn!(
-                    "execute: '{}' exited with {}",
-                    bare_cmd,
-                    status
-                );
+                tracing::warn!("execute: '{}' exited with {}", bare_cmd, status);
             }
         } else {
             // Last segment — this is the long-running server process.
@@ -665,7 +655,9 @@ async fn wait_for_port(name: &str, host: &str, port: u16) -> anyhow::Result<()> 
 
     tracing::info!(
         "server '{}': waiting for port {} on {} to accept connections …",
-        name, port, host
+        name,
+        port,
+        host
     );
 
     let addr = format!("{}:{}", host, port);
@@ -686,7 +678,9 @@ async fn wait_for_port(name: &str, host: &str, port: u16) -> anyhow::Result<()> 
         }
         Err(_) => anyhow::bail!(
             "server '{}': timed out waiting for port {} on {} after 360 s",
-            name, port, host
+            name,
+            port,
+            host
         ),
     }
 }

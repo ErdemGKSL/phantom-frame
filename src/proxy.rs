@@ -91,10 +91,12 @@ fn build_webhook_payload(
     let headers_map: serde_json::Map<String, serde_json::Value> = headers
         .iter()
         .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|v| (name.as_str().to_string(), serde_json::Value::String(v.to_string())))
+            value.to_str().ok().map(|v| {
+                (
+                    name.as_str().to_string(),
+                    serde_json::Value::String(v.to_string()),
+                )
+            })
         })
         .collect();
 
@@ -148,7 +150,11 @@ async fn call_webhook(
         .map(|s| s.to_string());
     let body = response.text().await.unwrap_or_default();
 
-    Ok(WebhookCallResult { status, location, body })
+    Ok(WebhookCallResult {
+        status,
+        location,
+        body,
+    })
 }
 
 /// Main proxy handler that serves prerendered content from cache
@@ -200,7 +206,12 @@ pub async fn proxy_handler(
     let path = uri.path();
     let query = uri.query().unwrap_or("");
     let headers = req.headers().clone();
-    tracing::debug!(method = method_str, path, query, "proxy request entered handler");
+    tracing::debug!(
+        method = method_str,
+        path,
+        query,
+        "proxy request entered handler"
+    );
 
     // Check if only GET requests are allowed
     if state.config.forward_get_only && method != axum::http::Method::GET {
@@ -229,14 +240,18 @@ pub async fn proxy_handler(
                     let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
                     let webhook_client = state.webhook_client.clone();
                     tokio::spawn(async move {
-                        if let Err(()) = call_webhook(&webhook_client, &url, &payload_clone, timeout_ms).await {
+                        if let Err(()) =
+                            call_webhook(&webhook_client, &url, &payload_clone, timeout_ms).await
+                        {
                             tracing::warn!("Notify webhook POST to '{}' failed", url);
                         }
                     });
                 }
                 WebhookType::Blocking => {
                     let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
-                    match call_webhook(&state.webhook_client, &webhook.url, &payload, timeout_ms).await {
+                    match call_webhook(&state.webhook_client, &webhook.url, &payload, timeout_ms)
+                        .await
+                    {
                         Ok(result) if result.status.is_success() => {
                             tracing::debug!(
                                 "Blocking webhook '{}' allowed {} {}",
@@ -255,7 +270,8 @@ pub async fn proxy_handler(
                             );
                             let mut builder = Response::builder().status(result.status);
                             if let Some(loc) = &result.location {
-                                builder = builder.header(axum::http::header::LOCATION, loc.as_str());
+                                builder =
+                                    builder.header(axum::http::header::LOCATION, loc.as_str());
                             }
                             return Ok(builder
                                 .body(Body::empty())
@@ -284,7 +300,9 @@ pub async fn proxy_handler(
                 }
                 WebhookType::CacheKey => {
                     let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
-                    match call_webhook(&state.webhook_client, &webhook.url, &payload, timeout_ms).await {
+                    match call_webhook(&state.webhook_client, &webhook.url, &payload, timeout_ms)
+                        .await
+                    {
                         Ok(result) if result.status.is_success() => {
                             let key = result.body.trim().to_string();
                             if !key.is_empty() {
@@ -350,8 +368,7 @@ pub async fn proxy_handler(
         query,
         headers: &headers,
     };
-    let cache_key = cache_key_override
-        .unwrap_or_else(|| (state.config.cache_key_fn)(&req_info));
+    let cache_key = cache_key_override.unwrap_or_else(|| (state.config.cache_key_fn)(&req_info));
     let cache_reads_enabled = !matches!(state.config.cache_strategy, crate::CacheStrategy::None);
 
     // Try to get 404 cache first (available even if should_cache is false)
@@ -958,15 +975,13 @@ pub(crate) async fn fetch_and_cache_snapshot(
     let upstream_encoding = response_headers
         .get(axum::http::header::CONTENT_ENCODING)
         .and_then(|v| v.to_str().ok());
-    let normalized = decode_upstream_body_async(
-        body_bytes,
-        upstream_encoding.map(|value| value.to_string()),
-    )
-    .await
-        .map_err(|e| anyhow::anyhow!("Failed to decode snapshot body for '{}': {}", path, e))?;
+    let normalized =
+        decode_upstream_body_async(body_bytes, upstream_encoding.map(|value| value.to_string()))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to decode snapshot body for '{}': {}", path, e))?;
 
-    let cached = build_cached_response(status, &response_headers, &normalized, compress_strategy)
-        .await?;
+    let cached =
+        build_cached_response(status, &response_headers, &normalized, compress_strategy).await?;
     cache.set(cache_key, cached).await;
     tracing::debug!("Snapshot pre-generated: {}", path);
     Ok(())
@@ -1046,7 +1061,9 @@ mod tests {
             HeaderValue::from_static("gzip"),
         );
 
-        let response = build_response_from_cache(cached, &request_headers).await.unwrap();
+        let response = build_response_from_cache(cached, &request_headers)
+            .await
+            .unwrap();
         assert!(response
             .headers()
             .get(axum::http::header::CONTENT_ENCODING)
@@ -1078,7 +1095,9 @@ mod tests {
             HeaderValue::from_static("br, gzip;q=0.5"),
         );
 
-        let response = build_response_from_cache(cached, &request_headers).await.unwrap();
+        let response = build_response_from_cache(cached, &request_headers)
+            .await
+            .unwrap();
         assert_eq!(
             response.headers().get(axum::http::header::CONTENT_ENCODING),
             Some(&HeaderValue::from_static("br"))

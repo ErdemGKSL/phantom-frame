@@ -291,8 +291,7 @@ fn resolve_env_vars(value: toml::Value) -> Option<toml::Value> {
             Some(toml::Value::Table(resolved))
         }
         toml::Value::Array(arr) => {
-            let resolved: Vec<toml::Value> =
-                arr.into_iter().filter_map(resolve_env_vars).collect();
+            let resolved: Vec<toml::Value> = arr.into_iter().filter_map(resolve_env_vars).collect();
             Some(toml::Value::Array(resolved))
         }
         other => Some(other),
@@ -323,14 +322,14 @@ impl Config {
                 dotenvy::dotenv().ok(); // silently ignore if .env absent
             }
             DotenvConfig::Path(ref p) => {
-                dotenvy::from_path(p)
-                    .map_err(|e| anyhow::anyhow!("failed to load .env from `{}`: {e}", p.display()))?;
+                dotenvy::from_path(p).map_err(|e| {
+                    anyhow::anyhow!("failed to load .env from `{}`: {e}", p.display())
+                })?;
             }
         }
 
         // Walk the full TOML tree and resolve all $env: references.
-        raw = resolve_env_vars(raw)
-            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        raw = resolve_env_vars(raw).unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
 
         let config: Config = raw.try_into()?;
         config.validate()?;
@@ -428,8 +427,7 @@ mod tests {
 
     #[test]
     fn test_config_top_level_ports() {
-        let toml = "http_port = 8080\ncontrol_port = 9000\n".to_string()
-            + &single_server_toml("");
+        let toml = "http_port = 8080\ncontrol_port = 9000\n".to_string() + &single_server_toml("");
         let config: Config = toml::from_str(&toml).unwrap();
         assert_eq!(config.http_port, 8080);
         assert_eq!(config.control_port, 9000);
@@ -449,14 +447,8 @@ mod tests {
                     [server.api]\nbind_to = \"/api\"\nproxy_url = \"http://localhost:8080\"\n";
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.server.len(), 2);
-        assert_eq!(
-            config.server.get("api").unwrap().bind_to,
-            "/api"
-        );
-        assert_eq!(
-            config.server.get("frontend").unwrap().bind_to,
-            "*"
-        );
+        assert_eq!(config.server.get("api").unwrap().bind_to, "/api");
+        assert_eq!(config.server.get("frontend").unwrap().bind_to, "*");
     }
 
     // ── env-var resolution tests ─────────────────────────────────────────────
@@ -503,7 +495,10 @@ mod tests {
         // config; TOML parses it as a string so serde coercion kicks in.
         // We just check the resolved tree has the string "9999".
         if let Some(toml::Value::Table(t)) = Some(resolved) {
-            assert_eq!(t.get("http_port"), Some(&toml::Value::String("9999".to_string())));
+            assert_eq!(
+                t.get("http_port"),
+                Some(&toml::Value::String("9999".to_string()))
+            );
         }
         std::env::remove_var("_PF_TEST_HTTP_PORT");
     }
@@ -528,7 +523,9 @@ mod tests {
     fn test_dotenv_string_path_is_path() {
         let toml = format!("dotenv = \"./.env.local\"\n{}", single_server_toml(""));
         let config: Config = toml::from_str(&toml).unwrap();
-        assert!(matches!(config.dotenv, DotenvConfig::Path(ref p) if p == &PathBuf::from("./.env.local")));
+        assert!(
+            matches!(config.dotenv, DotenvConfig::Path(ref p) if p == &PathBuf::from("./.env.local"))
+        );
     }
 
     #[test]

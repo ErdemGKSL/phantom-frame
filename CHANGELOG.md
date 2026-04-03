@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.11
+
+Release date: 2026-04-03
+
+### Added
+
+- **Bulk control endpoints for cache invalidation and snapshot management**. The control server now supports batched operations with shared optional server targeting and per-item result reporting:
+  - `POST /bulk_invalidate` — invalidate multiple wildcard patterns in one request with `{ "patterns": ["/api/*", "/blog/*"], "server": "frontend" }`.
+  - `POST /bulk_add_snapshot` — add multiple snapshot paths in one request with `{ "paths": ["/about", "/pricing"], "server": "frontend" }`.
+  - `POST /bulk_refresh_snapshot` — refresh multiple tracked snapshot paths in one request.
+  - `POST /bulk_remove_snapshot` — remove multiple tracked snapshot paths in one request.
+- Bulk control responses now return aggregate counts plus per-item `success` and `error` details so clients can handle partial failures without losing successful work.
+
+### Changed
+
+- **Bulk snapshot actions now execute asynchronously per path**. `bulk_add_snapshot`, `bulk_refresh_snapshot`, and `bulk_remove_snapshot` no longer process request items one-by-one; each path is dispatched concurrently and results are collected back into a stable response payload.
+- README control-endpoint documentation now reflects the current control API, including the long-standing `/invalidate_all` route and the new bulk endpoints.
+
 ## v0.2.10
 
 Release date: 2026-03-26

@@ -513,7 +513,8 @@ impl CacheStore {
     }
 
     pub async fn clear(&self) {
-        let standard_keys: Vec<String> = self.store.iter().map(|entry| entry.key().clone()).collect();
+        let standard_keys: Vec<String> =
+            self.store.iter().map(|entry| entry.key().clone()).collect();
         let not_found_keys: Vec<String> = self
             .store_404
             .iter()

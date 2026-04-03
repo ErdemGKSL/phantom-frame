@@ -6,8 +6,9 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 
 #[derive(Clone)]
 pub struct ControlState {
@@ -18,7 +19,10 @@ pub struct ControlState {
 
 impl ControlState {
     pub fn new(handles: Vec<(String, CacheHandle)>, auth_token: Option<String>) -> Self {
-        Self { handles, auth_token }
+        Self {
+            handles,
+            auth_token,
+        }
     }
 
     /// Return handles matching `server` (if provided) or all handles.
@@ -108,6 +112,45 @@ struct PathBody {
     server: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct BulkPatternBody {
+    patterns: Vec<String>,
+    /// Optional: only invalidate this named server's cache.
+    server: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BulkPathBody {
+    paths: Vec<String>,
+    /// Optional: only operate on this named server.
+    /// When omitted, the operation is broadcast to all servers.
+    server: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BulkOperationItemResult {
+    item: String,
+    success: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BulkOperationResponse {
+    operation: &'static str,
+    server: Option<String>,
+    requested: usize,
+    succeeded: usize,
+    failed: usize,
+    results: Vec<BulkOperationItemResult>,
+}
+
+#[derive(Clone, Copy)]
+enum BulkSnapshotAction {
+    Add,
+    Refresh,
+    Remove,
+}
+
 /// Returns `Err(UNAUTHORIZED)` when the request lacks a valid Bearer token.
 fn check_auth(state: &ControlState, headers: &HeaderMap) -> Result<(), StatusCode> {
     if let Some(required_token) = &state.auth_token {
@@ -121,6 +164,100 @@ fn check_auth(state: &ControlState, headers: &HeaderMap) -> Result<(), StatusCod
         }
     }
     Ok(())
+}
+
+fn validate_bulk_items<T>(items: &[T], field_name: &str) -> Result<(), (StatusCode, String)> {
+    if items.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("'{}' must contain at least one item", field_name),
+        ));
+    }
+    Ok(())
+}
+
+fn bulk_response(
+    operation: &'static str,
+    server: Option<String>,
+    results: Vec<BulkOperationItemResult>,
+) -> (StatusCode, Json<BulkOperationResponse>) {
+    let requested = results.len();
+    let succeeded = results.iter().filter(|result| result.success).count();
+    let failed = requested - succeeded;
+
+    (
+        StatusCode::OK,
+        Json(BulkOperationResponse {
+            operation,
+            server,
+            requested,
+            succeeded,
+            failed,
+            results,
+        }),
+    )
+}
+
+async fn run_bulk_snapshot_operation(
+    handles: Vec<&CacheHandle>,
+    paths: &[String],
+    action: BulkSnapshotAction,
+) -> Vec<BulkOperationItemResult> {
+    let handles: Arc<Vec<CacheHandle>> = Arc::new(handles.into_iter().cloned().collect());
+    let tasks: Vec<JoinHandle<BulkOperationItemResult>> = paths
+        .iter()
+        .cloned()
+        .map(|path| {
+            let handles = Arc::clone(&handles);
+            tokio::spawn(async move {
+                let error = run_snapshot_operation_for_path(handles.as_ref(), &path, action).await;
+
+                BulkOperationItemResult {
+                    item: path,
+                    success: error.is_none(),
+                    error,
+                }
+            })
+        })
+        .collect();
+
+    let mut results = Vec::with_capacity(tasks.len());
+
+    for task in tasks {
+        match task.await {
+            Ok(result) => results.push(result),
+            Err(err) => {
+                tracing::error!("bulk snapshot task failed: {}", err);
+                results.push(BulkOperationItemResult {
+                    item: "<unknown>".to_string(),
+                    success: false,
+                    error: Some("bulk snapshot task failed".to_string()),
+                });
+            }
+        }
+    }
+
+    results
+}
+
+async fn run_snapshot_operation_for_path(
+    handles: &[CacheHandle],
+    path: &str,
+    action: BulkSnapshotAction,
+) -> Option<String> {
+    for handle in handles {
+        let outcome = match action {
+            BulkSnapshotAction::Add => handle.add_snapshot(path).await,
+            BulkSnapshotAction::Refresh => handle.refresh_snapshot(path).await,
+            BulkSnapshotAction::Remove => handle.remove_snapshot(path).await,
+        };
+
+        if let Err(err) = outcome {
+            return Some(err.to_string());
+        }
+    }
+
+    None
 }
 
 /// POST /invalidate_all — invalidate every cached entry across all servers.
@@ -162,6 +299,42 @@ async fn invalidate_handler(
     Ok((StatusCode::OK, "Pattern invalidation triggered".to_string()))
 }
 
+/// POST /bulk_invalidate — invalidate entries matching multiple wildcard patterns.
+///
+/// Body: `{ "patterns": ["/api/*", "/blog/*"], "server": "frontend" }`
+/// or `{ "patterns": ["/api/*", "/blog/*"] }`
+async fn bulk_invalidate_handler(
+    State(state): State<Arc<ControlState>>,
+    headers: HeaderMap,
+    Json(body): Json<BulkPatternBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    check_auth(&state, &headers).map_err(|s| (s, String::new()))?;
+    validate_bulk_items(&body.patterns, "patterns")?;
+
+    let handles = state.resolve_handles(body.server.as_deref())?;
+    let mut results = Vec::with_capacity(body.patterns.len());
+
+    for pattern in &body.patterns {
+        for handle in &handles {
+            handle.invalidate(pattern);
+        }
+
+        results.push(BulkOperationItemResult {
+            item: pattern.clone(),
+            success: true,
+            error: None,
+        });
+    }
+
+    tracing::info!(
+        "bulk_invalidate(count={}) triggered via control endpoint (server={:?})",
+        body.patterns.len(),
+        body.server
+    );
+
+    Ok(bulk_response("bulk_invalidate", body.server, results))
+}
+
 /// POST /add_snapshot — fetch a path from upstream, cache it, and track it.
 ///
 /// Only available when the proxy is running in `PreGenerate` mode.
@@ -182,9 +355,35 @@ async fn add_snapshot_handler(
     }
     tracing::info!(
         "add_snapshot('{}') triggered via control endpoint (server={:?})",
-        body.path, body.server
+        body.path,
+        body.server
     );
     Ok((StatusCode::OK, "Snapshot added".to_string()))
+}
+
+/// POST /bulk_add_snapshot — fetch multiple paths from upstream, cache them, and track them.
+///
+/// Only available when the proxy is running in `PreGenerate` mode.
+/// Body: `{ "paths": ["/about", "/pricing"], "server": "frontend" }`
+/// or `{ "paths": ["/about", "/pricing"] }`
+async fn bulk_add_snapshot_handler(
+    State(state): State<Arc<ControlState>>,
+    headers: HeaderMap,
+    Json(body): Json<BulkPathBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    check_auth(&state, &headers).map_err(|s| (s, String::new()))?;
+    validate_bulk_items(&body.paths, "paths")?;
+
+    let handles = state.resolve_snapshot_handles(body.server.as_deref())?;
+    let results = run_bulk_snapshot_operation(handles, &body.paths, BulkSnapshotAction::Add).await;
+
+    tracing::info!(
+        "bulk_add_snapshot(count={}) triggered via control endpoint (server={:?})",
+        body.paths.len(),
+        body.server
+    );
+
+    Ok(bulk_response("bulk_add_snapshot", body.server, results))
 }
 
 /// POST /refresh_snapshot — re-fetch a cached snapshot path from upstream.
@@ -207,9 +406,36 @@ async fn refresh_snapshot_handler(
     }
     tracing::info!(
         "refresh_snapshot('{}') triggered via control endpoint (server={:?})",
-        body.path, body.server
+        body.path,
+        body.server
     );
     Ok((StatusCode::OK, "Snapshot refreshed".to_string()))
+}
+
+/// POST /bulk_refresh_snapshot — re-fetch multiple cached snapshot paths from upstream.
+///
+/// Only available when the proxy is running in `PreGenerate` mode.
+/// Body: `{ "paths": ["/about", "/pricing"], "server": "frontend" }`
+/// or `{ "paths": ["/about", "/pricing"] }`
+async fn bulk_refresh_snapshot_handler(
+    State(state): State<Arc<ControlState>>,
+    headers: HeaderMap,
+    Json(body): Json<BulkPathBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    check_auth(&state, &headers).map_err(|s| (s, String::new()))?;
+    validate_bulk_items(&body.paths, "paths")?;
+
+    let handles = state.resolve_snapshot_handles(body.server.as_deref())?;
+    let results =
+        run_bulk_snapshot_operation(handles, &body.paths, BulkSnapshotAction::Refresh).await;
+
+    tracing::info!(
+        "bulk_refresh_snapshot(count={}) triggered via control endpoint (server={:?})",
+        body.paths.len(),
+        body.server
+    );
+
+    Ok(bulk_response("bulk_refresh_snapshot", body.server, results))
 }
 
 /// POST /remove_snapshot — remove a path from the cache and snapshot list.
@@ -232,9 +458,36 @@ async fn remove_snapshot_handler(
     }
     tracing::info!(
         "remove_snapshot('{}') triggered via control endpoint (server={:?})",
-        body.path, body.server
+        body.path,
+        body.server
     );
     Ok((StatusCode::OK, "Snapshot removed".to_string()))
+}
+
+/// POST /bulk_remove_snapshot — remove multiple paths from the cache and snapshot list.
+///
+/// Only available when the proxy is running in `PreGenerate` mode.
+/// Body: `{ "paths": ["/about", "/pricing"], "server": "frontend" }`
+/// or `{ "paths": ["/about", "/pricing"] }`
+async fn bulk_remove_snapshot_handler(
+    State(state): State<Arc<ControlState>>,
+    headers: HeaderMap,
+    Json(body): Json<BulkPathBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    check_auth(&state, &headers).map_err(|s| (s, String::new()))?;
+    validate_bulk_items(&body.paths, "paths")?;
+
+    let handles = state.resolve_snapshot_handles(body.server.as_deref())?;
+    let results =
+        run_bulk_snapshot_operation(handles, &body.paths, BulkSnapshotAction::Remove).await;
+
+    tracing::info!(
+        "bulk_remove_snapshot(count={}) triggered via control endpoint (server={:?})",
+        body.paths.len(),
+        body.server
+    );
+
+    Ok(bulk_response("bulk_remove_snapshot", body.server, results))
 }
 
 /// POST /refresh_all_snapshots — re-fetch every tracked snapshot from upstream.
@@ -280,9 +533,19 @@ pub fn create_control_router(
     Router::new()
         .route("/invalidate_all", post(invalidate_all_handler))
         .route("/invalidate", post(invalidate_handler))
+        .route("/bulk_invalidate", post(bulk_invalidate_handler))
         .route("/add_snapshot", post(add_snapshot_handler))
+        .route("/bulk_add_snapshot", post(bulk_add_snapshot_handler))
         .route("/refresh_snapshot", post(refresh_snapshot_handler))
+        .route(
+            "/bulk_refresh_snapshot",
+            post(bulk_refresh_snapshot_handler),
+        )
         .route("/remove_snapshot", post(remove_snapshot_handler))
-        .route("/refresh_all_snapshots", post(refresh_all_snapshots_handler))
+        .route("/bulk_remove_snapshot", post(bulk_remove_snapshot_handler))
+        .route(
+            "/refresh_all_snapshots",
+            post(refresh_all_snapshots_handler),
+        )
         .with_state(state)
 }

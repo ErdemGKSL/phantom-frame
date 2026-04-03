@@ -388,10 +388,10 @@ impl CreateProxyConfig {
 /// The main library interface for using phantom-frame as a library
 /// Returns a proxy handler function and a cache handle
 pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
-    let upstream_client = proxy::build_upstream_client()
-        .expect("failed to build shared upstream HTTP client");
-    let webhook_client = proxy::build_webhook_client()
-        .expect("failed to build shared webhook HTTP client");
+    let upstream_client =
+        proxy::build_upstream_client().expect("failed to build shared upstream HTTP client");
+    let webhook_client =
+        proxy::build_webhook_client().expect("failed to build shared webhook HTTP client");
 
     // In PreGenerate mode, create a channel for the snapshot worker
     let (handle, snapshot_rx) = if let ProxyMode::PreGenerate { .. } = &config.proxy_mode {
@@ -412,9 +412,7 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
     spawn_invalidation_listener(cache.clone());
 
     // Spawn snapshot worker (warm-up + runtime snapshot management) in PreGenerate mode
-    if let (Some(rx), ProxyMode::PreGenerate { paths, .. }) =
-        (snapshot_rx, &config.proxy_mode)
-    {
+    if let (Some(rx), ProxyMode::PreGenerate { paths, .. }) = (snapshot_rx, &config.proxy_mode) {
         let worker = SnapshotWorker {
             rx,
             cache: cache.clone(),
@@ -427,7 +425,12 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
         tokio::spawn(worker.run());
     }
 
-    let proxy_state = Arc::new(ProxyState::new(cache, config, upstream_client, webhook_client));
+    let proxy_state = Arc::new(ProxyState::new(
+        cache,
+        config,
+        upstream_client,
+        webhook_client,
+    ));
 
     let app = Router::new()
         .fallback(proxy::proxy_handler)
@@ -443,10 +446,10 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
 /// Note: snapshot operations (PreGenerate mode warm-up) are not available
 /// through this variant — use [`create_proxy`] for full PreGenerate support.
 pub fn create_proxy_with_handle(config: CreateProxyConfig, handle: CacheHandle) -> Router {
-    let upstream_client = proxy::build_upstream_client()
-        .expect("failed to build shared upstream HTTP client");
-    let webhook_client = proxy::build_webhook_client()
-        .expect("failed to build shared webhook HTTP client");
+    let upstream_client =
+        proxy::build_upstream_client().expect("failed to build shared upstream HTTP client");
+    let webhook_client =
+        proxy::build_webhook_client().expect("failed to build shared webhook HTTP client");
 
     let cache = CacheStore::with_storage(
         handle,
@@ -458,7 +461,12 @@ pub fn create_proxy_with_handle(config: CreateProxyConfig, handle: CacheHandle) 
     // Spawn background task to listen for invalidation events
     spawn_invalidation_listener(cache.clone());
 
-    let proxy_state = Arc::new(ProxyState::new(cache, config, upstream_client, webhook_client));
+    let proxy_state = Arc::new(ProxyState::new(
+        cache,
+        config,
+        upstream_client,
+        webhook_client,
+    ));
 
     Router::new()
         .fallback(proxy::proxy_handler)
@@ -518,12 +526,10 @@ impl SnapshotWorker {
         // Process runtime snapshot requests.
         while let Some(req) = self.rx.recv().await {
             match req.op {
-                cache::SnapshotOp::Add(path) => {
-                    match self.fetch_and_store(&path).await {
-                        Ok(()) => self.snapshots.push(path),
-                        Err(e) => tracing::warn!("add_snapshot '{}' failed: {}", path, e),
-                    }
-                }
+                cache::SnapshotOp::Add(path) => match self.fetch_and_store(&path).await {
+                    Ok(()) => self.snapshots.push(path),
+                    Err(e) => tracing::warn!("add_snapshot '{}' failed: {}", path, e),
+                },
                 cache::SnapshotOp::Refresh(path) => {
                     if let Err(e) = self.fetch_and_store(&path).await {
                         tracing::warn!("refresh_snapshot '{}' failed: {}", path, e);
