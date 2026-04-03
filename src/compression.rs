@@ -8,6 +8,7 @@ use flate2::{
     Compression,
 };
 use std::io::{Read, Write};
+use tokio::task;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentEncoding {
@@ -68,6 +69,12 @@ pub fn compress_body(body: &[u8], encoding: ContentEncoding) -> Result<Vec<u8>> 
     }
 }
 
+pub async fn compress_body_async(body: Vec<u8>, encoding: ContentEncoding) -> Result<Vec<u8>> {
+    task::spawn_blocking(move || compress_body(&body, encoding))
+        .await
+        .map_err(|error| anyhow!("compression task failed: {}", error))?
+}
+
 pub fn decompress_body(body: &[u8], encoding: ContentEncoding) -> Result<Vec<u8>> {
     let mut output = Vec::new();
 
@@ -87,6 +94,12 @@ pub fn decompress_body(body: &[u8], encoding: ContentEncoding) -> Result<Vec<u8>
     }
 
     Ok(output)
+}
+
+pub async fn decompress_body_async(body: Vec<u8>, encoding: ContentEncoding) -> Result<Vec<u8>> {
+    task::spawn_blocking(move || decompress_body(&body, encoding))
+        .await
+        .map_err(|error| anyhow!("decompression task failed: {}", error))?
 }
 
 pub fn decode_upstream_body(body: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>> {
@@ -113,6 +126,15 @@ pub fn decode_upstream_body(body: &[u8], content_encoding: Option<&str>) -> Resu
         .ok_or_else(|| anyhow!("unsupported upstream content-encoding: {}", encodings[0]))?;
 
     decompress_body(body, encoding)
+}
+
+pub async fn decode_upstream_body_async(
+    body: Vec<u8>,
+    content_encoding: Option<String>,
+) -> Result<Vec<u8>> {
+    task::spawn_blocking(move || decode_upstream_body(&body, content_encoding.as_deref()))
+        .await
+        .map_err(|error| anyhow!("upstream decode task failed: {}", error))?
 }
 
 pub fn client_accepts_encoding(headers: &HeaderMap, encoding: ContentEncoding) -> bool {

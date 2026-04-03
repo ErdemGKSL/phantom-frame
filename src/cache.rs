@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -182,9 +183,9 @@ fn matches_pattern(key: &str, pattern: &str) -> bool {
 /// Cache storage for prerendered content
 #[derive(Clone)]
 pub struct CacheStore {
-    store: Arc<RwLock<HashMap<String, StoredCachedResponse>>>,
+    store: Arc<DashMap<String, StoredCachedResponse>>,
     // 404-specific store with bounded capacity and FIFO eviction
-    store_404: Arc<RwLock<HashMap<String, StoredCachedResponse>>>,
+    store_404: Arc<DashMap<String, StoredCachedResponse>>,
     keys_404: Arc<RwLock<VecDeque<String>>>,
     cache_404_capacity: usize,
     handle: CacheHandle,
@@ -431,8 +432,8 @@ impl CacheStore {
         cache_directory: Option<PathBuf>,
     ) -> Self {
         Self {
-            store: Arc::new(RwLock::new(HashMap::new())),
-            store_404: Arc::new(RwLock::new(HashMap::new())),
+            store: Arc::new(DashMap::new()),
+            store_404: Arc::new(DashMap::new()),
             keys_404: Arc::new(RwLock::new(VecDeque::new())),
             cache_404_capacity,
             handle,
@@ -441,20 +442,14 @@ impl CacheStore {
     }
 
     pub async fn get(&self, key: &str) -> Option<CachedResponse> {
-        let cached = {
-            let store = self.store.read().await;
-            store.get(key).cloned()
-        }?;
+        let cached = self.store.get(key).map(|entry| entry.clone())?;
 
         cached.materialize(&self.body_store).await
     }
 
     /// Get a 404 cached response (if present)
     pub async fn get_404(&self, key: &str) -> Option<CachedResponse> {
-        let cached = {
-            let store = self.store_404.read().await;
-            store.get(key).cloned()
-        }?;
+        let cached = self.store_404.get(key).map(|entry| entry.clone())?;
 
         cached.materialize(&self.body_store).await
     }
@@ -466,10 +461,7 @@ impl CacheStore {
             .await;
         let stored = into_stored_response(body, response);
 
-        let replaced = {
-            let mut store = self.store.write().await;
-            store.insert(key, stored)
-        };
+        let replaced = self.store.insert(key, stored);
 
         if let Some(old) = replaced {
             self.body_store.remove(old.body).await;
@@ -490,24 +482,23 @@ impl CacheStore {
         let stored = into_stored_response(body, response);
 
         let removed_bodies = {
-            let mut store = self.store_404.write().await;
             let mut keys = self.keys_404.write().await;
             let mut removed = Vec::new();
 
-            if store.contains_key(&key) {
+            if self.store_404.contains_key(&key) {
                 if let Some(pos) = keys.iter().position(|existing_key| existing_key == &key) {
                     keys.remove(pos);
                 }
             }
 
-            if let Some(old) = store.insert(key.clone(), stored) {
+            if let Some(old) = self.store_404.insert(key.clone(), stored) {
                 removed.push(old.body);
             }
             keys.push_back(key);
 
             while keys.len() > self.cache_404_capacity {
                 if let Some(old_key) = keys.pop_front() {
-                    if let Some(old) = store.remove(&old_key) {
+                    if let Some((_, old)) = self.store_404.remove(&old_key) {
                         removed.push(old.body);
                     }
                 }
@@ -522,14 +513,27 @@ impl CacheStore {
     }
 
     pub async fn clear(&self) {
+        let standard_keys: Vec<String> = self.store.iter().map(|entry| entry.key().clone()).collect();
+        let not_found_keys: Vec<String> = self
+            .store_404
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
         let removed_bodies = {
             let mut removed = Vec::new();
 
-            let mut store = self.store.write().await;
-            removed.extend(store.drain().map(|(_, response)| response.body));
+            for key in standard_keys {
+                if let Some((_, response)) = self.store.remove(&key) {
+                    removed.push(response.body);
+                }
+            }
 
-            let mut store404 = self.store_404.write().await;
-            removed.extend(store404.drain().map(|(_, response)| response.body));
+            for key in not_found_keys {
+                if let Some((_, response)) = self.store_404.remove(&key) {
+                    removed.push(response.body);
+                }
+            }
 
             let mut keys = self.keys_404.write().await;
             keys.clear();
@@ -544,29 +548,30 @@ impl CacheStore {
 
     /// Clear cache entries matching a pattern (supports wildcards)
     pub async fn clear_by_pattern(&self, pattern: &str) {
+        let keys_to_remove: Vec<String> = self
+            .store
+            .iter()
+            .filter(|entry| matches_pattern(entry.key(), pattern))
+            .map(|entry| entry.key().clone())
+            .collect();
+        let keys_to_remove_404: Vec<String> = self
+            .store_404
+            .iter()
+            .filter(|entry| matches_pattern(entry.key(), pattern))
+            .map(|entry| entry.key().clone())
+            .collect();
+
         let removed_bodies = {
             let mut removed = Vec::new();
 
-            let mut store = self.store.write().await;
-            let keys_to_remove: Vec<String> = store
-                .keys()
-                .filter(|key| matches_pattern(key, pattern))
-                .cloned()
-                .collect();
             for key in keys_to_remove {
-                if let Some(old) = store.remove(&key) {
+                if let Some((_, old)) = self.store.remove(&key) {
                     removed.push(old.body);
                 }
             }
 
-            let mut store404 = self.store_404.write().await;
-            let keys_to_remove_404: Vec<String> = store404
-                .keys()
-                .filter(|key| matches_pattern(key, pattern))
-                .cloned()
-                .collect();
             for key in &keys_to_remove_404 {
-                if let Some(old) = store404.remove(key) {
+                if let Some((_, old)) = self.store_404.remove(key) {
                     removed.push(old.body);
                 }
             }
@@ -588,14 +593,12 @@ impl CacheStore {
 
     /// Get the number of cached items
     pub async fn size(&self) -> usize {
-        let store = self.store.read().await;
-        store.len()
+        self.store.len()
     }
 
     /// Size of 404 cache
     pub async fn size_404(&self) -> usize {
-        let store = self.store_404.read().await;
-        store.len()
+        self.store_404.len()
     }
 }
 
@@ -740,8 +743,7 @@ mod tests {
             .await;
 
         let stored_path = {
-            let store_guard = store.store.read().await;
-            match &store_guard.get("GET:/asset.js").unwrap().body {
+            match &store.store.get("GET:/asset.js").unwrap().body {
                 StoredBody::File(path) => path.clone(),
                 StoredBody::Memory(_) => panic!("expected filesystem-backed cache body"),
             }
@@ -778,8 +780,7 @@ mod tests {
         }
 
         let evicted_path = {
-            let store_guard = store.store_404.read().await;
-            match &store_guard.get("GET:/missing1").unwrap().body {
+            match &store.store_404.get("GET:/missing1").unwrap().body {
                 StoredBody::File(path) => path.clone(),
                 StoredBody::Memory(_) => panic!("expected filesystem-backed cache body"),
             }
@@ -832,12 +833,11 @@ mod tests {
             .await;
 
         let (removed_path, kept_path) = {
-            let store_guard = store.store.read().await;
-            let removed = match &store_guard.get("GET:/api/one").unwrap().body {
+            let removed = match &store.store.get("GET:/api/one").unwrap().body {
                 StoredBody::File(path) => path.clone(),
                 StoredBody::Memory(_) => panic!("expected filesystem-backed cache body"),
             };
-            let kept = match &store_guard.get("GET:/other/two").unwrap().body {
+            let kept = match &store.store.get("GET:/other/two").unwrap().body {
                 StoredBody::File(path) => path.clone(),
                 StoredBody::Memory(_) => panic!("expected filesystem-backed cache body"),
             };

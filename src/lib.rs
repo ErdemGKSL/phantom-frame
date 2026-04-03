@@ -388,6 +388,11 @@ impl CreateProxyConfig {
 /// The main library interface for using phantom-frame as a library
 /// Returns a proxy handler function and a cache handle
 pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
+    let upstream_client = proxy::build_upstream_client()
+        .expect("failed to build shared upstream HTTP client");
+    let webhook_client = proxy::build_webhook_client()
+        .expect("failed to build shared webhook HTTP client");
+
     // In PreGenerate mode, create a channel for the snapshot worker
     let (handle, snapshot_rx) = if let ProxyMode::PreGenerate { .. } = &config.proxy_mode {
         let (tx, rx) = mpsc::channel(32);
@@ -413,6 +418,7 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
         let worker = SnapshotWorker {
             rx,
             cache: cache.clone(),
+            upstream_client: upstream_client.clone(),
             proxy_url: config.proxy_url.clone(),
             compress_strategy: config.compress_strategy.clone(),
             cache_key_fn: config.cache_key_fn.clone(),
@@ -421,7 +427,7 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
         tokio::spawn(worker.run());
     }
 
-    let proxy_state = Arc::new(ProxyState::new(cache, config));
+    let proxy_state = Arc::new(ProxyState::new(cache, config, upstream_client, webhook_client));
 
     let app = Router::new()
         .fallback(proxy::proxy_handler)
@@ -437,6 +443,11 @@ pub fn create_proxy(config: CreateProxyConfig) -> (Router, CacheHandle) {
 /// Note: snapshot operations (PreGenerate mode warm-up) are not available
 /// through this variant — use [`create_proxy`] for full PreGenerate support.
 pub fn create_proxy_with_handle(config: CreateProxyConfig, handle: CacheHandle) -> Router {
+    let upstream_client = proxy::build_upstream_client()
+        .expect("failed to build shared upstream HTTP client");
+    let webhook_client = proxy::build_webhook_client()
+        .expect("failed to build shared webhook HTTP client");
+
     let cache = CacheStore::with_storage(
         handle,
         config.cache_404_capacity,
@@ -447,7 +458,7 @@ pub fn create_proxy_with_handle(config: CreateProxyConfig, handle: CacheHandle) 
     // Spawn background task to listen for invalidation events
     spawn_invalidation_listener(cache.clone());
 
-    let proxy_state = Arc::new(ProxyState::new(cache, config));
+    let proxy_state = Arc::new(ProxyState::new(cache, config, upstream_client, webhook_client));
 
     Router::new()
         .fallback(proxy::proxy_handler)
@@ -486,6 +497,7 @@ fn spawn_invalidation_listener(cache: CacheStore) {
 struct SnapshotWorker {
     rx: mpsc::Receiver<cache::SnapshotRequest>,
     cache: CacheStore,
+    upstream_client: reqwest::Client,
     proxy_url: String,
     compress_strategy: CompressStrategy,
     cache_key_fn: Arc<dyn Fn(&RequestInfo) -> String + Send + Sync>,
@@ -546,6 +558,7 @@ impl SnapshotWorker {
     async fn fetch_and_store(&self, path: &str) -> anyhow::Result<()> {
         proxy::fetch_and_cache_snapshot(
             path,
+            &self.upstream_client,
             &self.proxy_url,
             &self.cache,
             &self.compress_strategy,

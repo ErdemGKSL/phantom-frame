@@ -1,7 +1,7 @@
 use crate::cache::{CacheStore, CachedResponse};
 use crate::compression::{
-    client_accepts_encoding, compress_body, configured_encoding, decode_upstream_body,
-    decompress_body, identity_acceptable,
+    client_accepts_encoding, compress_body_async, configured_encoding, decode_upstream_body_async,
+    decompress_body_async, identity_acceptable,
 };
 use crate::path_matcher::should_cache_path;
 use crate::{CompressStrategy, CreateProxyConfig, ProxyMode, WebhookType};
@@ -13,17 +13,52 @@ use axum::{
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct ProxyState {
     cache: CacheStore,
     config: CreateProxyConfig,
+    upstream_client: reqwest::Client,
+    webhook_client: reqwest::Client,
 }
 
 impl ProxyState {
-    pub fn new(cache: CacheStore, config: CreateProxyConfig) -> Self {
-        Self { cache, config }
+    pub fn new(
+        cache: CacheStore,
+        config: CreateProxyConfig,
+        upstream_client: reqwest::Client,
+        webhook_client: reqwest::Client,
+    ) -> Self {
+        Self {
+            cache,
+            config,
+            upstream_client,
+            webhook_client,
+        }
     }
+}
+
+pub(crate) fn build_upstream_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(30))
+        .no_brotli()
+        .no_deflate()
+        .no_gzip()
+        .build()
+        .map_err(Into::into)
+}
+
+pub(crate) fn build_webhook_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(Into::into)
 }
 
 /// Check if the request is a WebSocket or other upgrade request
@@ -92,18 +127,14 @@ struct WebhookCallResult {
 /// - `Ok(WebhookCallResult)` — status, optional `Location` header, and body.
 /// - `Err(())` — timeout, connection error, or other transport failure.
 async fn call_webhook(
+    client: &reqwest::Client,
     url: &str,
     payload: &serde_json::Value,
     timeout_ms: u64,
 ) -> Result<WebhookCallResult, ()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| ())?;
-
     let response = client
         .post(url)
+        .timeout(std::time::Duration::from_millis(timeout_ms))
         .json(payload)
         .send()
         .await
@@ -126,6 +157,7 @@ pub async fn proxy_handler(
     Extension(state): Extension<Arc<ProxyState>>,
     req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
+    let request_started = Instant::now();
     // Check for upgrade requests FIRST (before consuming anything from the request)
     // This is critical for WebSocket to work properly
     let is_upgrade = is_upgrade_request(req.headers());
@@ -168,6 +200,7 @@ pub async fn proxy_handler(
     let path = uri.path();
     let query = uri.query().unwrap_or("");
     let headers = req.headers().clone();
+    tracing::debug!(method = method_str, path, query, "proxy request entered handler");
 
     // Check if only GET requests are allowed
     if state.config.forward_get_only && method != axum::http::Method::GET {
@@ -185,6 +218,7 @@ pub async fn proxy_handler(
     let mut cache_key_override: Option<String> = None;
     if !state.config.webhooks.is_empty() {
         let payload = build_webhook_payload(method_str, path, query, &headers);
+        let webhook_started = Instant::now();
 
         for webhook in &state.config.webhooks {
             match webhook.webhook_type {
@@ -193,15 +227,16 @@ pub async fn proxy_handler(
                     let url = webhook.url.clone();
                     let payload_clone = payload.clone();
                     let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
+                    let webhook_client = state.webhook_client.clone();
                     tokio::spawn(async move {
-                        if let Err(()) = call_webhook(&url, &payload_clone, timeout_ms).await {
+                        if let Err(()) = call_webhook(&webhook_client, &url, &payload_clone, timeout_ms).await {
                             tracing::warn!("Notify webhook POST to '{}' failed", url);
                         }
                     });
                 }
                 WebhookType::Blocking => {
                     let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
-                    match call_webhook(&webhook.url, &payload, timeout_ms).await {
+                    match call_webhook(&state.webhook_client, &webhook.url, &payload, timeout_ms).await {
                         Ok(result) if result.status.is_success() => {
                             tracing::debug!(
                                 "Blocking webhook '{}' allowed {} {}",
@@ -249,7 +284,7 @@ pub async fn proxy_handler(
                 }
                 WebhookType::CacheKey => {
                     let timeout_ms = webhook.timeout_ms.unwrap_or(5000);
-                    match call_webhook(&webhook.url, &payload, timeout_ms).await {
+                    match call_webhook(&state.webhook_client, &webhook.url, &payload, timeout_ms).await {
                         Ok(result) if result.status.is_success() => {
                             let key = result.body.trim().to_string();
                             if !key.is_empty() {
@@ -291,6 +326,13 @@ pub async fn proxy_handler(
                 }
             }
         }
+
+        tracing::debug!(
+            method = method_str,
+            path,
+            elapsed_ms = webhook_started.elapsed().as_millis(),
+            "proxy request completed webhook phase"
+        );
     }
 
     // Check if this path should be cached based on include/exclude patterns
@@ -317,7 +359,14 @@ pub async fn proxy_handler(
         if let Some(cached) = state.cache.get_404(&cache_key).await {
             if cached_response_is_allowed(&state.config.cache_strategy, &cached) {
                 tracing::debug!("404 cache hit for: {} {}", method_str, cache_key);
-                return build_response_from_cache(cached, &headers);
+                let response = build_response_from_cache(cached, &headers).await?;
+                tracing::debug!(
+                    method = method_str,
+                    path,
+                    elapsed_ms = request_started.elapsed().as_millis(),
+                    "proxy request served from 404 cache"
+                );
+                return Ok(response);
             }
         }
     }
@@ -327,7 +376,14 @@ pub async fn proxy_handler(
         if let Some(cached) = state.cache.get(&cache_key).await {
             if cached_response_is_allowed(&state.config.cache_strategy, &cached) {
                 tracing::debug!("Cache hit for: {} {}", method_str, cache_key);
-                return build_response_from_cache(cached, &headers);
+                let response = build_response_from_cache(cached, &headers).await?;
+                tracing::debug!(
+                    method = method_str,
+                    path,
+                    elapsed_ms = request_started.elapsed().as_millis(),
+                    "proxy request served from main cache"
+                );
+                return Ok(response);
             }
         }
         // PreGenerate mode: serve only from cache, no backend fallthrough on miss
@@ -378,20 +434,10 @@ pub async fn proxy_handler(
         .map(|pq| pq.as_str())
         .unwrap_or_else(|| uri.path());
     let target_url = format!("{}{}", state.config.proxy_url, path_and_query);
-    let client = match reqwest::Client::builder()
-        .no_brotli()
-        .no_deflate()
-        .no_gzip()
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!("Failed to build upstream HTTP client: {}", error);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
+    let upstream_started = Instant::now();
 
-    let response = match client
+    let response = match state
+        .upstream_client
         .request(method.clone(), &target_url)
         .headers(convert_headers(&headers))
         .body(body_bytes.to_vec())
@@ -404,6 +450,12 @@ pub async fn proxy_handler(
             return Err(StatusCode::BAD_GATEWAY);
         }
     };
+    tracing::debug!(
+        method = method_str,
+        path,
+        elapsed_ms = upstream_started.elapsed().as_millis(),
+        "proxy request received upstream response headers"
+    );
 
     // Cache the response (only if caching is enabled for this path)
     let status = response.status().as_u16();
@@ -430,7 +482,12 @@ pub async fn proxy_handler(
         && response_is_cacheable
         && (should_cache || state.config.cache_404_capacity > 0);
     let normalized_body = if should_try_cache || state.config.use_404_meta {
-        match decode_upstream_body(&body_bytes, upstream_content_encoding) {
+        match decode_upstream_body_async(
+            body_bytes.clone(),
+            upstream_content_encoding.map(|value| value.to_string()),
+        )
+        .await
+        {
             Ok(body) => Some(body),
             Err(error) => {
                 tracing::warn!(
@@ -471,7 +528,9 @@ pub async fn proxy_handler(
             &response_headers,
             normalized_body.as_deref().unwrap(),
             &state.config.compress_strategy,
-        ) {
+        )
+        .await
+        {
             Ok(cached_response) => cached_response,
             Err(error) => {
                 tracing::warn!(
@@ -502,9 +561,22 @@ pub async fn proxy_handler(
             tracing::debug!("Cached response for: {} {}", method_str, cache_key);
         }
 
-        return build_response_from_cache(cached_response, &headers);
+        let response = build_response_from_cache(cached_response, &headers).await?;
+        tracing::debug!(
+            method = method_str,
+            path,
+            elapsed_ms = request_started.elapsed().as_millis(),
+            "proxy request completed after upstream fetch and cache write"
+        );
+        return Ok(response);
     }
 
+    tracing::debug!(
+        method = method_str,
+        path,
+        elapsed_ms = request_started.elapsed().as_millis(),
+        "proxy request completed without caching"
+    );
     Ok(build_response_from_upstream(
         status,
         &response_headers,
@@ -683,7 +755,7 @@ async fn handle_upgrade_request(
     Ok(response)
 }
 
-fn build_response_from_cache(
+async fn build_response_from_cache(
     cached: CachedResponse,
     request_headers: &HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
@@ -703,7 +775,7 @@ fn build_response_from_cache(
 
             response_headers.remove("content-encoding");
             upsert_vary_accept_encoding(&mut response_headers);
-            match decompress_body(&cached.body, content_encoding) {
+            match decompress_body_async(cached.body.clone(), content_encoding).await {
                 Ok(body) => body,
                 Err(error) => {
                     tracing::error!("Failed to decompress cached response: {}", error);
@@ -721,7 +793,7 @@ fn build_response_from_cache(
     Ok(build_response(cached.status, response_headers, body))
 }
 
-fn build_cached_response(
+async fn build_cached_response(
     status: u16,
     response_headers: &reqwest::header::HeaderMap,
     normalized_body: &[u8],
@@ -734,7 +806,7 @@ fn build_cached_response(
 
     let content_encoding = configured_encoding(compress_strategy);
     let body = if let Some(content_encoding) = content_encoding {
-        let compressed = compress_body(normalized_body, content_encoding)?;
+        let compressed = compress_body_async(normalized_body.to_vec(), content_encoding).await?;
         headers.insert(
             "content-encoding".to_string(),
             content_encoding.as_header_value().to_string(),
@@ -853,6 +925,7 @@ fn convert_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
 /// Used by the snapshot worker for PreGenerate warm-up and runtime snapshot management.
 pub(crate) async fn fetch_and_cache_snapshot(
     path: &str,
+    client: &reqwest::Client,
     proxy_url: &str,
     cache: &CacheStore,
     compress_strategy: &CompressStrategy,
@@ -866,13 +939,6 @@ pub(crate) async fn fetch_and_cache_snapshot(
         headers: &empty_headers,
     };
     let cache_key = cache_key_fn(&req_info);
-
-    let client = reqwest::Client::builder()
-        .no_brotli()
-        .no_deflate()
-        .no_gzip()
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client for snapshot fetch: {}", e))?;
 
     let url = format!("{}{}", proxy_url, path);
     let response = client
@@ -892,10 +958,15 @@ pub(crate) async fn fetch_and_cache_snapshot(
     let upstream_encoding = response_headers
         .get(axum::http::header::CONTENT_ENCODING)
         .and_then(|v| v.to_str().ok());
-    let normalized = decode_upstream_body(&body_bytes, upstream_encoding)
+    let normalized = decode_upstream_body_async(
+        body_bytes,
+        upstream_encoding.map(|value| value.to_string()),
+    )
+    .await
         .map_err(|e| anyhow::anyhow!("Failed to decode snapshot body for '{}': {}", path, e))?;
 
-    let cached = build_cached_response(status, &response_headers, &normalized, compress_strategy)?;
+    let cached = build_cached_response(status, &response_headers, &normalized, compress_strategy)
+        .await?;
     cache.set(cache_key, cached).await;
     tracing::debug!("Snapshot pre-generated: {}", path);
     Ok(())
@@ -919,7 +990,7 @@ fn convert_headers_to_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compression::{compress_body, ContentEncoding};
+    use crate::compression::ContentEncoding;
     use axum::body::to_bytes;
 
     fn response_headers() -> reqwest::header::HeaderMap {
@@ -931,14 +1002,15 @@ mod tests {
         headers
     }
 
-    #[test]
-    fn test_build_cached_response_uses_selected_encoding() {
+    #[tokio::test]
+    async fn test_build_cached_response_uses_selected_encoding() {
         let cached = build_cached_response(
             200,
             &response_headers(),
             b"<html>compressed</html>",
             &CompressStrategy::Gzip,
         )
+        .await
         .unwrap();
 
         assert_eq!(cached.content_encoding, Some(ContentEncoding::Gzip));
@@ -955,7 +1027,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_response_from_cache_falls_back_to_identity() {
         let body = b"<html>identity</html>";
-        let compressed = compress_body(body, ContentEncoding::Brotli).unwrap();
+        let compressed = crate::compression::compress_body(body, ContentEncoding::Brotli).unwrap();
         let cached = CachedResponse {
             body: compressed,
             headers: HashMap::from([
@@ -974,7 +1046,7 @@ mod tests {
             HeaderValue::from_static("gzip"),
         );
 
-        let response = build_response_from_cache(cached, &request_headers).unwrap();
+        let response = build_response_from_cache(cached, &request_headers).await.unwrap();
         assert!(response
             .headers()
             .get(axum::http::header::CONTENT_ENCODING)
@@ -987,7 +1059,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_response_from_cache_keeps_supported_encoding() {
         let body = b"<html>compressed</html>";
-        let compressed = compress_body(body, ContentEncoding::Brotli).unwrap();
+        let compressed = crate::compression::compress_body(body, ContentEncoding::Brotli).unwrap();
         let cached = CachedResponse {
             body: compressed.clone(),
             headers: HashMap::from([
@@ -1006,7 +1078,7 @@ mod tests {
             HeaderValue::from_static("br, gzip;q=0.5"),
         );
 
-        let response = build_response_from_cache(cached, &request_headers).unwrap();
+        let response = build_response_from_cache(cached, &request_headers).await.unwrap();
         assert_eq!(
             response.headers().get(axum::http::header::CONTENT_ENCODING),
             Some(&HeaderValue::from_static("br"))
